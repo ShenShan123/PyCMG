@@ -3,12 +3,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <complex>
 #include <fstream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "osdi_host.h"
 
@@ -232,7 +234,326 @@ public:
     inst_.bind_simulation(sim_, model_->model(), connected_terminals_, temperature_);
   }
 
+  py::dict eval_dc(const py::dict &nodes) {
+    set_node_voltages(nodes);
+    solve_internal_nodes();
+
+    std::uint32_t flags = ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
+                          CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
+                          CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
+                          CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM;
+    (void)inst_.eval(model_->model(), sim_, flags);
+    sim_.clear();
+    inst_.load_residuals(model_->model(), sim_);
+    inst_.load_jacobian(model_->model(), sim_);
+
+    py::dict out;
+    out["id"] = read_current("d");
+    out["ig"] = read_current("g");
+    out["is"] = read_current("s");
+    out["ie"] = read_current("e");
+
+    double qg = 0.0, qd = 0.0, qs = 0.0, qb = 0.0;
+    read_opvar("qg", "qgate", qg);
+    read_opvar("qd", "qdrain", qd);
+    read_opvar("qs", "qsource", qs);
+    if (!read_opvar("qb", "qbulk", qb)) {
+      read_opvar("qe", "qe", qb);
+    }
+    out["qg"] = qg;
+    out["qd"] = qd;
+    out["qs"] = qs;
+    out["qb"] = qb;
+
+    double gm = 0.0, gds = 0.0, gmb = 0.0;
+    read_opvar("gm", "gm", gm);
+    read_opvar("gds", "gds", gds);
+    if (!read_opvar("gmbs", "gmbs", gmb)) {
+      read_opvar("gmb", "gmb", gmb);
+    }
+    out["gm"] = gm;
+    out["gds"] = gds;
+    out["gmb"] = gmb;
+
+    auto caps = condense_caps();
+    out["cgg"] = caps.cgg;
+    out["cgd"] = caps.cgd;
+    out["cgs"] = caps.cgs;
+    out["cdg"] = caps.cdg;
+    out["cdd"] = caps.cdd;
+
+    return out;
+  }
+
 private:
+  struct CondensedCaps {
+    double cgg = 0.0;
+    double cgd = 0.0;
+    double cgs = 0.0;
+    double cdg = 0.0;
+    double cdd = 0.0;
+  };
+
+  void set_node_voltages(const py::dict &nodes) {
+    auto set_or_default = [&](const std::string &name) {
+      double value = 0.0;
+      py::str key(name);
+      if (nodes.contains(key)) {
+        value = py::cast<double>(nodes[key]);
+      }
+      sim_.set_voltage(name, value);
+    };
+    set_or_default("d");
+    set_or_default("g");
+    set_or_default("s");
+    set_or_default("e");
+
+    if (sim_.node_index.count("di") && !nodes.contains(py::str("di"))) {
+      sim_.set_voltage("di", sim_.solve[sim_.node_index["d"]]);
+    }
+    if (sim_.node_index.count("si") && !nodes.contains(py::str("si"))) {
+      sim_.set_voltage("si", sim_.solve[sim_.node_index["s"]]);
+    }
+  }
+
+  void solve_internal_nodes() {
+    bool ok = inst_.solve_internal_nodes(model_->model(), sim_, 200, 1e-9);
+    (void)ok;
+  }
+
+  double read_current(const std::string &name) const {
+    auto it = sim_.node_index.find(name);
+    if (it == sim_.node_index.end()) {
+      return 0.0;
+    }
+    return -sim_.residual_resist[it->second];
+  }
+
+  bool read_opvar(const std::string &name, const std::string &alias, double &out) const {
+    const OsdiDescriptor *desc = model_->desc();
+    for (std::uint32_t i = 0; i < desc->num_params; ++i) {
+      const OsdiParamOpvar &param = desc->param_opvar[i];
+      bool matched = false;
+      if (param.name && param.name[0] && to_lower(param.name[0]) == to_lower(name)) {
+        matched = true;
+      } else if (param.name && param.num_alias > 1) {
+        for (std::uint32_t a = 1; a < param.num_alias; ++a) {
+          if (param.name[a] && to_lower(param.name[a]) == to_lower(alias)) {
+            matched = true;
+            break;
+          }
+        }
+      }
+      if (!matched) {
+        continue;
+      }
+      void *ptr = desc->access(inst_.data(), model_->model().data(), i,
+                               ACCESS_FLAG_READ | ACCESS_FLAG_INSTANCE);
+      if (!ptr) {
+        ptr = desc->access(inst_.data(), model_->model().data(), i, ACCESS_FLAG_READ);
+      }
+      if (!ptr) {
+        return false;
+      }
+      std::uint32_t ty = (param.flags & PARA_TY_MASK);
+      if (ty == PARA_TY_INT) {
+        out = static_cast<double>(*reinterpret_cast<std::int32_t *>(ptr));
+      } else if (ty == PARA_TY_REAL) {
+        out = *reinterpret_cast<double *>(ptr);
+      } else {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  static void build_full_jacobian(
+      const osdi_host::OsdiSimulation &sim,
+      const std::vector<double> &values,
+      std::vector<double> &out) {
+    std::size_t n = sim.node_names.size();
+    out.assign(n * n, 0.0);
+    for (std::size_t k = 0; k < sim.jacobian_info.size(); ++k) {
+      auto row = sim.jacobian_info[k].first;
+      auto col = sim.jacobian_info[k].second;
+      if (row < n && col < n && k < values.size()) {
+        out[row * n + col] = values[k];
+      }
+    }
+  }
+
+  static bool solve_linear_system_multi_complex(
+      std::vector<std::complex<double>> &a,
+      std::vector<std::complex<double>> &b,
+      int n,
+      int m) {
+    for (int i = 0; i < n; ++i) {
+      int pivot = i;
+      double max_val = std::abs(a[i * n + i]);
+      for (int r = i + 1; r < n; ++r) {
+        double v = std::abs(a[r * n + i]);
+        if (v > max_val) {
+          max_val = v;
+          pivot = r;
+        }
+      }
+      if (max_val == 0.0) {
+        return false;
+      }
+      if (pivot != i) {
+        for (int c = i; c < n; ++c) {
+          std::swap(a[i * n + c], a[pivot * n + c]);
+        }
+        for (int c = 0; c < m; ++c) {
+          std::swap(b[i * m + c], b[pivot * m + c]);
+        }
+      }
+      std::complex<double> diag = a[i * n + i];
+      for (int c = i; c < n; ++c) {
+        a[i * n + c] /= diag;
+      }
+      for (int c = 0; c < m; ++c) {
+        b[i * m + c] /= diag;
+      }
+      for (int r = i + 1; r < n; ++r) {
+        std::complex<double> factor = a[r * n + i];
+        if (factor == std::complex<double>(0.0, 0.0)) {
+          continue;
+        }
+        for (int c = i; c < n; ++c) {
+          a[r * n + c] -= factor * a[i * n + c];
+        }
+        for (int c = 0; c < m; ++c) {
+          b[r * m + c] -= factor * b[i * m + c];
+        }
+      }
+    }
+    for (int i = n - 1; i >= 0; --i) {
+      for (int r = 0; r < i; ++r) {
+        std::complex<double> factor = a[r * n + i];
+        if (factor == std::complex<double>(0.0, 0.0)) {
+          continue;
+        }
+        a[r * n + i] = 0.0;
+        for (int c = 0; c < m; ++c) {
+          b[r * m + c] -= factor * b[i * m + c];
+        }
+      }
+    }
+    return true;
+  }
+
+  static bool condense_capacitance(
+      const std::vector<double> &g_full,
+      const std::vector<double> &c_full,
+      std::size_t full_size,
+      const std::vector<std::uint32_t> &external,
+      const std::vector<std::uint32_t> &internal,
+      std::vector<double> &c_condensed) {
+    std::size_t ne = external.size();
+    std::size_t ni = internal.size();
+    c_condensed.assign(ne * ne, 0.0);
+    if (ne == 0) {
+      return true;
+    }
+    const std::complex<double> jw(0.0, 1.0);
+    auto idx = [&](std::uint32_t r, std::uint32_t c) {
+      return static_cast<std::size_t>(r) * full_size + static_cast<std::size_t>(c);
+    };
+
+    std::vector<std::complex<double>> yee(ne * ne);
+    std::vector<std::complex<double>> yei(ne * ni);
+    std::vector<std::complex<double>> yie(ni * ne);
+    std::vector<std::complex<double>> yii(ni * ni);
+
+    for (std::size_t r = 0; r < ne; ++r) {
+      for (std::size_t c = 0; c < ne; ++c) {
+        std::size_t pos = idx(external[r], external[c]);
+        yee[r * ne + c] = g_full[pos] + jw * c_full[pos];
+      }
+      for (std::size_t c = 0; c < ni; ++c) {
+        std::size_t pos = idx(external[r], internal[c]);
+        yei[r * ni + c] = g_full[pos] + jw * c_full[pos];
+      }
+    }
+    for (std::size_t r = 0; r < ni; ++r) {
+      for (std::size_t c = 0; c < ne; ++c) {
+        std::size_t pos = idx(internal[r], external[c]);
+        yie[r * ne + c] = g_full[pos] + jw * c_full[pos];
+      }
+      for (std::size_t c = 0; c < ni; ++c) {
+        std::size_t pos = idx(internal[r], internal[c]);
+        yii[r * ni + c] = g_full[pos] + jw * c_full[pos];
+      }
+    }
+
+    if (ni == 0) {
+      for (std::size_t r = 0; r < ne; ++r) {
+        for (std::size_t c = 0; c < ne; ++c) {
+          c_condensed[r * ne + c] = std::imag(yee[r * ne + c]);
+        }
+      }
+      return true;
+    }
+
+    std::vector<std::complex<double>> yii_copy = yii;
+    std::vector<std::complex<double>> yie_copy = yie;
+    if (!solve_linear_system_multi_complex(yii_copy, yie_copy,
+                                           static_cast<int>(ni),
+                                           static_cast<int>(ne))) {
+      return false;
+    }
+
+    for (std::size_t r = 0; r < ne; ++r) {
+      for (std::size_t c = 0; c < ne; ++c) {
+        std::complex<double> accum = yee[r * ne + c];
+        for (std::size_t k = 0; k < ni; ++k) {
+          accum -= yei[r * ni + k] * yie_copy[k * ne + c];
+        }
+        c_condensed[r * ne + c] = std::imag(accum);
+      }
+    }
+    return true;
+  }
+
+  CondensedCaps condense_caps() const {
+    std::vector<double> g_full;
+    std::vector<double> c_full;
+    build_full_jacobian(sim_, sim_.jacobian_resist, g_full);
+    build_full_jacobian(sim_, sim_.jacobian_react, c_full);
+    std::vector<double> c_condensed;
+    condense_capacitance(g_full, c_full, sim_.node_names.size(),
+                         sim_.terminal_indices, sim_.internal_indices, c_condensed);
+    auto idx_of = [&](const std::string &name) -> int {
+      for (std::size_t i = 0; i < sim_.terminal_indices.size(); ++i) {
+        if (sim_.node_names[sim_.terminal_indices[i]] == name) {
+          return static_cast<int>(i);
+        }
+      }
+      return -1;
+    };
+    CondensedCaps caps;
+    if (c_condensed.empty()) {
+      return caps;
+    }
+    int g = idx_of("g");
+    int d = idx_of("d");
+    int s = idx_of("s");
+    if (g >= 0) {
+      std::size_t n = sim_.terminal_indices.size();
+      caps.cgg = c_condensed[g * n + g];
+      if (d >= 0) caps.cgd = c_condensed[g * n + d];
+      if (s >= 0) caps.cgs = c_condensed[g * n + s];
+    }
+    if (d >= 0 && g >= 0) {
+      std::size_t n = sim_.terminal_indices.size();
+      caps.cdg = c_condensed[d * n + g];
+      caps.cdd = c_condensed[d * n + d];
+    }
+    return caps;
+  }
+
   std::shared_ptr<PycmgModel> model_;
   osdi_host::OsdiInstance inst_;
   osdi_host::OsdiSimulation sim_;
@@ -253,5 +574,6 @@ PYBIND11_MODULE(_pycmg, m) {
       .def(py::init<std::shared_ptr<PycmgModel>, const py::dict &, double>(),
            py::arg("model"),
            py::arg("params") = py::dict(),
-           py::arg("temperature") = 300.15);
+           py::arg("temperature") = 300.15)
+      .def("eval_dc", &PycmgInstance::eval_dc, py::arg("nodes"));
 }
