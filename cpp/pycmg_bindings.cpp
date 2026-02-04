@@ -353,14 +353,28 @@ private:
 
   bool read_opvar(const std::string &name, const std::string &alias, double &out) const {
     const OsdiDescriptor *desc = model_->desc();
-    for (std::uint32_t i = 0; i < desc->num_params; ++i) {
+    std::string name_lower = to_lower(name);
+    std::string alias_lower = to_lower(alias);
+    std::uint32_t total = desc->num_params + desc->num_opvars;
+    for (std::uint32_t i = 0; i < total; ++i) {
       const OsdiParamOpvar &param = desc->param_opvar[i];
+      if ((param.flags & PARA_KIND_MASK) != PARA_KIND_OPVAR) {
+        continue;
+      }
       bool matched = false;
-      if (param.name && param.name[0] && to_lower(param.name[0]) == to_lower(name)) {
-        matched = true;
-      } else if (param.name && param.num_alias > 1) {
-        for (std::uint32_t a = 1; a < param.num_alias; ++a) {
-          if (param.name[a] && to_lower(param.name[a]) == to_lower(alias)) {
+      if (param.num_alias == 0) {
+        const char *alias_name = param.name ? param.name[0] : nullptr;
+        if (alias_name && to_lower(alias_name) == name_lower) {
+          matched = true;
+        }
+      } else {
+        for (std::uint32_t a = 0; a < param.num_alias; ++a) {
+          const char *alias_name = param.name ? param.name[a] : nullptr;
+          if (!alias_name) {
+            continue;
+          }
+          std::string alias_name_lower = to_lower(alias_name);
+          if (alias_name_lower == name_lower || alias_name_lower == alias_lower) {
             matched = true;
             break;
           }
@@ -369,10 +383,9 @@ private:
       if (!matched) {
         continue;
       }
-      void *ptr = desc->access(inst_.data(), model_->model().data(), i,
-                               ACCESS_FLAG_READ | ACCESS_FLAG_INSTANCE);
+      void *ptr = desc->access(inst_.data(), model_->model().data(), i, ACCESS_FLAG_INSTANCE);
       if (!ptr) {
-        ptr = desc->access(inst_.data(), model_->model().data(), i, ACCESS_FLAG_READ);
+        ptr = desc->access(inst_.data(), model_->model().data(), i, ACCESS_FLAG_READ | ACCESS_FLAG_INSTANCE);
       }
       if (!ptr) {
         return false;
