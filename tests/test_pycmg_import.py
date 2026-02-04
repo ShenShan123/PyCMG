@@ -1,5 +1,5 @@
 import pycmg
 
 
-def test_import():
+def test_import() -> None:
     assert hasattr(pycmg, "Model")

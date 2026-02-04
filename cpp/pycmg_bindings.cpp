@@ -252,6 +252,10 @@ public:
     }
   }
 
+  int internal_node_count() const {
+    return static_cast<int>(sim_.internal_indices.size());
+  }
+
   py::dict eval_dc(const py::dict &nodes) {
     set_node_voltages(nodes);
     solve_internal_nodes();
@@ -596,5 +600,6 @@ PYBIND11_MODULE(_pycmg, m) {
       .def("set_params", &PycmgInstance::set_params,
            py::arg("params"),
            py::arg("allow_rebind") = false)
+      .def("internal_node_count", &PycmgInstance::internal_node_count)
       .def("eval_dc", &PycmgInstance::eval_dc, py::arg("nodes"));
 }
