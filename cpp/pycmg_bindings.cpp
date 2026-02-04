@@ -234,6 +234,24 @@ public:
     inst_.bind_simulation(sim_, model_->model(), connected_terminals_, temperature_);
   }
 
+  void set_params(const py::dict &params, bool allow_rebind) {
+    for (const auto &item : params) {
+      const auto key = py::cast<std::string>(item.first);
+      const auto value = py::cast<double>(item.second);
+      apply_param(model_->desc(), &inst_, &model_->model(), key, value, false);
+    }
+
+    std::vector<std::uint32_t> internal =
+        inst_.process_params(model_->model(), connected_terminals_, temperature_);
+    if (internal.size() != sim_.internal_indices.size()) {
+      if (!allow_rebind) {
+        throw std::runtime_error("topology changed; rebind required");
+      }
+      sim_ = osdi_host::OsdiSimulation();
+      inst_.bind_simulation(sim_, model_->model(), connected_terminals_, temperature_);
+    }
+  }
+
   py::dict eval_dc(const py::dict &nodes) {
     set_node_voltages(nodes);
     solve_internal_nodes();
@@ -575,5 +593,8 @@ PYBIND11_MODULE(_pycmg, m) {
            py::arg("model"),
            py::arg("params") = py::dict(),
            py::arg("temperature") = 300.15)
+      .def("set_params", &PycmgInstance::set_params,
+           py::arg("params"),
+           py::arg("allow_rebind") = false)
       .def("eval_dc", &PycmgInstance::eval_dc, py::arg("nodes"));
 }
