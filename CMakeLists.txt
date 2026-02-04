@@ -32,6 +32,7 @@ install(FILES "${OSDI_OUT}" DESTINATION osdi)
 add_library(osdi_host STATIC
   cpp/osdi_host.cpp
 )
+set_target_properties(osdi_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(osdi_host PUBLIC
   "${CMAKE_SOURCE_DIR}/third_party/osdi/include"
   "${CMAKE_SOURCE_DIR}/cpp"
