@@ -15,6 +15,8 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * `cpp/`: C++ OSDI host and bindings.
 * `bsim-cmg-va/benchmark_test/`: SPICE netlists and model cards for verification.
 * `build/`: Compilation artifacts (.osdi, binaries).
+* `build-deep-verify/`: Dedicated build outputs for verification tooling.
+* `circuit_examples/`: Test circuits and verification outputs.
 
 ## Implementation Workflow
 
@@ -81,8 +83,10 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 - OSDI init out-of-bounds errors should be treated as warnings (matching ngspice behavior), not fatal.
 - Some OSDI params are integer-typed; read/write using `PARA_TY_INT` to avoid garbage values.
 - Internal-node DC solve must use residuals/Jacobian with cleared buffers; once params are correct, residuals match ngspice currents.
+- Do not pass `prev_solve` to OSDI unless it is explicitly initialized; uninitialized `prev_solve` breaks DC/AC comparisons.
 
 ## Gap Checklist (Inventory vs Workflow)
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
 - C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
 - PyBind11 layer: `_pycmg` module exposes `Model`, `Instance`, and `eval_dc`.
+- Transient evaluation: `_pycmg` exposes `eval_tran`; playback verification added in `scripts/deep_verify.py` but transient matching is still failing and needs follow-up.

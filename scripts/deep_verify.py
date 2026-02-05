@@ -274,6 +274,18 @@ def col_index(headers, name):
     return None
 
 
+def find_col(headers, names: List[str]) -> Optional[int]:
+    for name in names:
+        idx = col_index(headers, name)
+        if idx is not None:
+            return idx
+    return None
+
+
+def format_inst_params(inst_params) -> str:
+    return " ".join(f"{k}={v}" for k, v in inst_params.items())
+
+
 def run_ngspice(netlist_text: str, out_csv: Path, log_path: Path, wrdata_cols: str):
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     net_path = out_csv.parent / "netlist.cir"
@@ -463,6 +475,35 @@ def parse_ng_caps(path: Path):
     return caps
 
 
+def run_ngspice_tran(modelcard: Path,
+                     model_name: str,
+                     inst_params,
+                     step: float,
+                     stop: float,
+                     out_dir: Path):
+    net = [
+        "* Tran playback netlist",
+        f'.include "{modelcard}"',
+        "Vd d 0 0.05",
+        "Vg g 0 PWL(0 0 1n 0 2n 1.2 10n 1.2)",
+        "Vs s 0 0",
+        "Ve e 0 0",
+        f"N1 d g s e {model_name}",
+        ".options method=gear maxord=1",
+        f".tran {step} {stop}",
+        ".end",
+    ]
+    out_csv = out_dir / "ng_tran.csv"
+    run_ngspice(
+        "\n".join(net),
+        out_csv,
+        out_dir / "ng_tran.log",
+        "time v(g) v(d) v(s) v(e) "
+        "i(vg) i(vd) i(vs) i(ve) "
+        "@n1[qg] @n1[qd] @n1[qs] @n1[qb]",
+    )
+    return out_csv
+
 
 def run_osdi_eval(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve):
     cmd = [
@@ -545,6 +586,159 @@ def make_pycmg_eval(modelcard: Path, model_name: str, inst_params):
 
     return _eval
 
+
+def make_pycmg_eval_tran(modelcard: Path, model_name: str, inst_params):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    try:
+        import pycmg  # type: ignore
+    except ImportError as exc:
+        die(f"pycmg import failed: {exc}")
+    model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name)
+    inst = pycmg.Instance(model, params=inst_params)
+
+    def _eval(nodes: Dict[str, float], time: float, delta_t: float):
+        return inst.eval_tran(nodes, time, delta_t)
+
+    return _eval
+
+
+def compare_tran(modelcard: Path,
+                 model_name: str,
+                 inst_params,
+                 ng_csv: Path,
+                 out_dir: Path,
+                 step: float,
+                 backend: str) -> bool:
+    if backend != BACKEND_PYCMG:
+        print("Transient playback is supported only with pycmg backend.")
+        return True
+
+    headers, rows = parse_wrdata(ng_csv)
+    time_idx = col_index(headers, "time")
+    vg_idx = col_index(headers, "v(g)")
+    vd_idx = col_index(headers, "v(d)")
+    vs_idx = col_index(headers, "v(s)")
+    ve_idx = col_index(headers, "v(e)")
+    id_idx = find_col(headers, ["@n1[id]", "@N1[id]", "i(vd)"])
+    ig_idx = find_col(headers, ["@n1[ig]", "@N1[ig]", "i(vg)"])
+    is_idx = find_col(headers, ["@n1[is]", "@N1[is]", "i(vs)"])
+    ib_idx = find_col(headers, ["@n1[ib]", "@N1[ib]", "i(ve)"])
+    qg_idx = find_col(headers, ["@n1[qg]", "@N1[qg]", "@n1[qgate]", "@N1[qgate]"])
+    qd_idx = find_col(headers, ["@n1[qd]", "@N1[qd]", "@n1[qdrain]", "@N1[qdrain]"])
+    qs_idx = find_col(headers, ["@n1[qs]", "@N1[qs]", "@n1[qsource]", "@N1[qsource]"])
+    qb_idx = find_col(headers, ["@n1[qb]", "@N1[qb]", "@n1[qe]", "@N1[qe]"])
+
+    required = [time_idx, vg_idx, vd_idx, vs_idx, ve_idx, id_idx, ig_idx, is_idx, ib_idx, qg_idx, qd_idx, qs_idx, qb_idx]
+    if any(idx is None for idx in required):
+        die("missing columns in ngspice transient output")
+
+    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params)
+
+    out_rows = []
+    max_rel = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0, "qg": 0.0, "qd": 0.0, "qs": 0.0, "qb": 0.0}
+    max_abs = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0, "qg": 0.0, "qd": 0.0, "qs": 0.0, "qb": 0.0}
+
+    def rel_err(ref: float, got: float, abs_tol: float) -> float:
+        diff = abs(got - ref)
+        if diff <= abs_tol:
+            return 0.0
+        denom = max(abs(ref), abs_tol)
+        return diff / denom
+
+    prev_time = None
+    for row in rows:
+        t = row[time_idx]  # type: ignore[index]
+        dt = step if prev_time is None else (t - prev_time)
+        prev_time = t
+        nodes = {
+            "d": row[vd_idx],  # type: ignore[index]
+            "g": row[vg_idx],  # type: ignore[index]
+            "s": row[vs_idx],  # type: ignore[index]
+            "e": row[ve_idx],  # type: ignore[index]
+        }
+        osdi = eval_tran(nodes, t, dt)
+        ng_id = row[id_idx]  # type: ignore[index]
+        ng_ig = row[ig_idx]  # type: ignore[index]
+        ng_is = row[is_idx]  # type: ignore[index]
+        ng_ib = row[ib_idx]  # type: ignore[index]
+        ng_qg = row[qg_idx]  # type: ignore[index]
+        ng_qd = row[qd_idx]  # type: ignore[index]
+        ng_qs = row[qs_idx]  # type: ignore[index]
+        ng_qb = row[qb_idx]  # type: ignore[index]
+        osdi_id = osdi["id"]
+        osdi_ig = osdi["ig"]
+        osdi_is = osdi["is"]
+        osdi_ib = osdi["ie"]
+        osdi_qg = osdi["qg"]
+        osdi_qd = osdi["qd"]
+        osdi_qs = osdi["qs"]
+        osdi_qb = osdi["qb"]
+
+        out_rows.append(
+            (
+                t,
+                nodes["g"], nodes["d"], nodes["s"], nodes["e"],
+                ng_id, osdi_id,
+                ng_ig, osdi_ig,
+                ng_is, osdi_is,
+                ng_ib, osdi_ib,
+                ng_qg, osdi_qg,
+                ng_qd, osdi_qd,
+                ng_qs, osdi_qs,
+                ng_qb, osdi_qb,
+                osdi_id - ng_id,
+                osdi_qg - ng_qg,
+            )
+        )
+
+        for key, ref, got, abs_tol in [
+            ("id", ng_id, osdi_id, ABS_TOL_I),
+            ("ig", ng_ig, osdi_ig, ABS_TOL_I),
+            ("is", ng_is, osdi_is, ABS_TOL_I),
+            ("ib", ng_ib, osdi_ib, ABS_TOL_I),
+            ("qg", ng_qg, osdi_qg, ABS_TOL_Q),
+            ("qd", ng_qd, osdi_qd, ABS_TOL_Q),
+            ("qs", ng_qs, osdi_qs, ABS_TOL_Q),
+            ("qb", ng_qb, osdi_qb, ABS_TOL_Q),
+        ]:
+            diff = abs(got - ref)
+            if diff > max_abs[key]:
+                max_abs[key] = diff
+            rerr = rel_err(ref, got, abs_tol)
+            if rerr > max_rel[key]:
+                max_rel[key] = rerr
+
+    out_csv = out_dir / "osdi_tran.csv"
+    with out_csv.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "time",
+            "v_g", "v_d", "v_s", "v_e",
+            "ng_id", "osdi_id",
+            "ng_ig", "osdi_ig",
+            "ng_is", "osdi_is",
+            "ng_ib", "osdi_ib",
+            "ng_qg", "osdi_qg",
+            "ng_qd", "osdi_qd",
+            "ng_qs", "osdi_qs",
+            "ng_qb", "osdi_qb",
+            "err_id", "err_qg",
+        ])
+        w.writerows(out_rows)
+
+    print("Transient comparison summary:")
+    for key in ("id", "ig", "is", "ib", "qg", "qd", "qs", "qb"):
+        print(f"  {key}: max_abs={max_abs[key]:.3e} max_rel={max_rel[key]:.3e}")
+
+    ok = True
+    for key in ("id", "ig", "is", "ib"):
+        if max_abs[key] > ABS_TOL_I and max_rel[key] > REL_TOL:
+            ok = False
+    for key in ("qg", "qd", "qs", "qb"):
+        if max_abs[key] > ABS_TOL_Q and max_rel[key] > REL_TOL:
+            ok = False
+    return ok
 
 def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, ng_caps, out_dir: Path, backend: str):
     headers, rows = parse_wrdata(ng_csv)
@@ -885,6 +1079,11 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
     pass_cgs = max_or_zero(metrics_vg["cgs"][0]) <= REL_TOL
     pass_cdg = max_or_zero(metrics_vg["cdg"][0]) <= REL_TOL
     pass_cdd = max_or_zero(metrics_vg["cdd"][0]) <= REL_TOL
+    pass_tran = True
+    if args.tran:
+        tran_dir = out_dir / "ng_tran"
+        ng_tran = run_ngspice_tran(modelcard, model_name, inst_params, args.tran_step, args.tran_stop, tran_dir)
+        pass_tran = compare_tran(modelcard, model_name, inst_params, ng_tran, out_dir, args.tran_step, backend)
     all_pass = all([
         pass_id_vg, pass_ig_vg, pass_is_vg, pass_ib_vg,
         pass_qg_vg, pass_qd_vg, pass_qs_vg, pass_qb_vg,
@@ -893,6 +1092,7 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
         pass_qg_vd, pass_qd_vd, pass_qs_vd, pass_qb_vd,
         pass_gm_vd, pass_gds_vd, pass_gmb_vd,
         pass_cgg, pass_cgd, pass_cgs, pass_cdg, pass_cdd,
+        pass_tran,
     ])
     status = "PASS" if all_pass else "FAIL"
     print(f"Overall ({label}): {status} (abs_tol={ABS_TOL_I}, rel_tol={REL_TOL})")
@@ -902,6 +1102,7 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
 def run_stress_tests(modelcard: Path, model_name: str, inst_params, samples: int, seed: Optional[int]) -> bool:
     rng = random.Random(seed)
     eval_pycmg = make_pycmg_eval(modelcard, model_name, inst_params)
+    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params)
     ok = True
     for _ in range(samples):
         vd = rng.uniform(0.0, 1.2)
@@ -924,6 +1125,26 @@ def run_stress_tests(modelcard: Path, model_name: str, inst_params, samples: int
             if diff > max(ABS_TOL_C, abs(ref) * REL_TOL):
                 ok = False
                 break
+        if not ok:
+            break
+
+    t = 0.0
+    dt = 1e-12
+    for _ in range(samples):
+        t += dt
+        nodes = {
+            "d": rng.uniform(0.0, 1.2),
+            "g": rng.uniform(0.0, 1.2),
+            "s": 0.0,
+            "e": 0.0,
+        }
+        out = eval_tran(nodes, t, dt)
+        for key in ("id", "ig", "is", "ie", "qg", "qd", "qs", "qb"):
+            if not math.isfinite(out[key]):
+                ok = False
+                break
+        if not ok:
+            break
     return ok
 
 
@@ -938,8 +1159,12 @@ def main():
     ap.add_argument("--vd-step", type=float, default=0.1)
     ap.add_argument("--backend", choices=[BACKEND_PYCMG, BACKEND_OSDI], default=BACKEND_PYCMG)
     ap.add_argument("--stress", action="store_true")
+    ap.add_argument("--stress-only", action="store_true", help="Run only stress tests, skipping NGSPICE verification")
     ap.add_argument("--stress-samples", type=int, default=20)
     ap.add_argument("--stress-seed", type=int)
+    ap.add_argument("--tran", action="store_true")
+    ap.add_argument("--tran-step", type=float, default=1e-11)
+    ap.add_argument("--tran-stop", type=float, default=1e-8)
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -958,18 +1183,24 @@ def main():
         cases.append((f"testcase{idx:02d}_pmos", "pmos1", MODEL_SRC_PMOS, MODEL_DST_PMOS, combo))
 
     overall_ok = True
-    for label, model_name, model_src, model_dst, inst_params in cases:
-        case_dir, parsed = prepare_case(label, model_name, inst_params)
-        results_dir = case_dir / "results"
-        ensure_modelcard(model_src, model_dst, parsed)
-        ok = run_suite(model_dst, model_name, label, results_dir, args, parsed, args.backend)
-        overall_ok = overall_ok and ok
+    if not args.stress_only:
+        for label, model_name, model_src, model_dst, inst_params in cases:
+            case_dir, parsed = prepare_case(label, model_name, inst_params)
+            results_dir = case_dir / "results"
+            ensure_modelcard(model_src, model_dst, parsed)
+            ok = run_suite(model_dst, model_name, label, results_dir, args, parsed, args.backend)
+            overall_ok = overall_ok and ok
 
-    if args.stress:
+    if args.stress or args.stress_only:
         stress_ok = True
+        print(f"Running stress tests (samples={args.stress_samples})...")
         for label, model_name, model_src, model_dst, inst_params in cases:
             ensure_modelcard(model_src, model_dst, inst_params)
             stress_ok = run_stress_tests(model_dst, model_name, inst_params, args.stress_samples, args.stress_seed) and stress_ok
+        if stress_ok:
+            print("Stress tests passed.")
+        else:
+            print("Stress tests FAILED.")
         overall_ok = overall_ok and stress_ok
 
     status = "PASS" if overall_ok else "FAIL"

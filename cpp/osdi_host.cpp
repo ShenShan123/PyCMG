@@ -279,7 +279,9 @@ OsdiSimulation::OsdiSimulation() {
   node_index.emplace("gnd", 0);
   residual_resist.push_back(0.0);
   residual_react.push_back(0.0);
+  rhs_tran.push_back(0.0);
   solve.push_back(0.0);
+  prev_solve.push_back(0.0);
   jacobian_info.emplace_back(0, 0);
   jacobian_index.emplace(0, 0);
   sim_param_names.push_back(nullptr);
@@ -297,7 +299,9 @@ std::uint32_t OsdiSimulation::register_node(const std::string &name) {
   node_index.emplace(name, idx);
   residual_resist.push_back(0.0);
   residual_react.push_back(0.0);
+  rhs_tran.push_back(0.0);
   solve.push_back(0.0);
+  prev_solve.push_back(0.0);
   return idx;
 }
 
@@ -334,6 +338,7 @@ void OsdiSimulation::build_jacobian() {
 void OsdiSimulation::clear() {
   std::fill(residual_resist.begin(), residual_resist.end(), 0.0);
   std::fill(residual_react.begin(), residual_react.end(), 0.0);
+  std::fill(rhs_tran.begin(), rhs_tran.end(), 0.0);
   std::fill(jacobian_resist.begin(), jacobian_resist.end(), 0.0);
   std::fill(jacobian_react.begin(), jacobian_react.end(), 0.0);
 }
@@ -453,6 +458,14 @@ std::uint32_t OsdiInstance::eval(
     const OsdiModel &model,
     OsdiSimulation &sim,
     std::uint32_t flags) {
+  return eval_with_time(model, sim, flags, 0.0);
+}
+
+std::uint32_t OsdiInstance::eval_with_time(
+    const OsdiModel &model,
+    OsdiSimulation &sim,
+    std::uint32_t flags,
+    double abstime) {
   OsdiSimParas sim_params{};
   sim_params.names = const_cast<char **>(sim.sim_param_names.data());
   sim_params.vals = sim.sim_param_vals.data();
@@ -461,8 +474,12 @@ std::uint32_t OsdiInstance::eval(
 
   OsdiSimInfo sim_info{};
   sim_info.paras = sim_params;
-  sim_info.abstime = 0.0;
-  sim_info.prev_solve = sim.solve.data();
+  sim_info.abstime = abstime;
+  if (sim.has_prev_solve) {
+    sim_info.prev_solve = sim.prev_solve.data();
+  } else {
+    sim_info.prev_solve = sim.solve.data();
+  }
   sim_info.prev_state = sim.state_prev.data();
   sim_info.next_state = sim.state_next.data();
   sim_info.flags = flags;
@@ -487,6 +504,22 @@ void OsdiInstance::load_jacobian(const OsdiModel &model, OsdiSimulation &sim) {
 void OsdiInstance::load_spice_rhs_dc(const OsdiModel &model, OsdiSimulation &sim) {
   descriptor_->load_spice_rhs_dc(
       inst_data_, model.data(), sim.residual_resist.data(), sim.solve.data());
+}
+
+void OsdiInstance::load_spice_rhs_tran(
+    const OsdiModel &model,
+    OsdiSimulation &sim,
+    double alpha) {
+  descriptor_->load_spice_rhs_tran(
+      inst_data_, model.data(), sim.rhs_tran.data(), sim.prev_solve.data(), alpha);
+}
+
+void OsdiInstance::load_jacobian_tran(
+    const OsdiModel &model,
+    OsdiSimulation &sim,
+    double alpha) {
+  (void)sim;
+  descriptor_->load_jacobian_tran(inst_data_, model.data(), alpha);
 }
 
 namespace {
@@ -599,6 +632,92 @@ bool OsdiInstance::solve_internal_nodes(
       int r = it_r->second;
       int c = it_c->second;
       a[r * n + c] = sim.jacobian_resist[k];
+    }
+
+    std::vector<double> a_copy = a;
+    std::vector<double> delta = b;
+    if (!solve_linear_system(a_copy, delta, n)) {
+      return false;
+    }
+
+    for (int i = 0; i < n; ++i) {
+      auto idx = sim.internal_indices[i];
+      double update = delta[i];
+      if (update > 0.2) {
+        update = 0.2;
+      } else if (update < -0.2) {
+        update = -0.2;
+      }
+      sim.solve[idx] += update;
+    }
+  }
+  return false;
+}
+
+bool OsdiInstance::solve_internal_nodes_tran(
+    const OsdiModel &model,
+    OsdiSimulation &sim,
+    double abstime,
+    double alpha,
+    int max_iter,
+    double tol) {
+  if (sim.internal_indices.empty()) {
+    return true;
+  }
+
+  std::unordered_map<std::uint32_t, int> internal_pos;
+  internal_pos.reserve(sim.internal_indices.size());
+  for (std::size_t i = 0; i < sim.internal_indices.size(); ++i) {
+    internal_pos.emplace(sim.internal_indices[i], static_cast<int>(i));
+  }
+
+  auto residual_norm = [&](const std::vector<double> &res) {
+    double max_abs = 0.0;
+    for (auto idx : sim.internal_indices) {
+      max_abs = std::max(max_abs, std::abs(res[idx]));
+    }
+    return max_abs;
+  };
+
+  for (int iter = 0; iter < max_iter; ++iter) {
+    std::uint32_t flags = ANALYSIS_TRAN | CALC_RESIST_RESIDUAL | CALC_RESIST_JACOBIAN |
+                          CALC_RESIST_LIM_RHS | CALC_REACT_RESIDUAL |
+                          CALC_REACT_JACOBIAN | CALC_REACT_LIM_RHS |
+                          ENABLE_LIM | INIT_LIM;
+    eval_with_time(model, sim, flags, abstime);
+    sim.clear();
+    load_residuals(model, sim);
+    load_jacobian(model, sim);
+    load_spice_rhs_tran(model, sim, alpha);
+
+    std::vector<double> total_residual(sim.residual_resist.size(), 0.0);
+    for (std::size_t i = 0; i < total_residual.size(); ++i) {
+      total_residual[i] = sim.residual_resist[i] + alpha * sim.residual_react[i] - sim.rhs_tran[i];
+    }
+
+    double norm = residual_norm(total_residual);
+    if (norm < tol) {
+      return true;
+    }
+
+    int n = static_cast<int>(sim.internal_indices.size());
+    std::vector<double> a(n * n, 0.0);
+    std::vector<double> b(n, 0.0);
+    for (int i = 0; i < n; ++i) {
+      b[i] = -total_residual[sim.internal_indices[i]];
+    }
+
+    for (std::size_t k = 0; k < sim.jacobian_info.size(); ++k) {
+      auto row = sim.jacobian_info[k].first;
+      auto col = sim.jacobian_info[k].second;
+      auto it_r = internal_pos.find(row);
+      auto it_c = internal_pos.find(col);
+      if (it_r == internal_pos.end() || it_c == internal_pos.end()) {
+        continue;
+      }
+      int r = it_r->second;
+      int c = it_c->second;
+      a[r * n + c] = sim.jacobian_resist[k] + alpha * sim.jacobian_react[k];
     }
 
     std::vector<double> a_copy = a;
