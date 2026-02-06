@@ -56,6 +56,7 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
     4.  Assert accuracy within accepted tolerance (e.g., `1e-9`).
 * **Temperature sweeps:** Always apply `.temp` in NGSPICE and pass `temperature` (K) to `pycmg.Instance`.
 * **Stress tests:** Random OP points must compare **pycmg vs NGSPICE** (not osdi_eval). Use NGSPICE `.op` per point and compare I/Q/gm/gds/gmb within tolerances.
+* **Robustness tests:** Use `scripts/test_robustness.py` (`--all`) for pulse stability, param sensitivity with RSS check, and thread safety.
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).

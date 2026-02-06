@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <complex>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -256,8 +258,13 @@ public:
     return static_cast<int>(sim_.internal_indices.size());
   }
 
+  int state_count() const {
+    const OsdiDescriptor *desc = model_->desc();
+    return desc ? static_cast<int>(desc->num_states) : 0;
+  }
+
   py::dict eval_dc(const py::dict &nodes) {
-    set_node_voltages(nodes);
+    set_node_voltages(nodes, true);
     solve_internal_nodes();
 
     std::uint32_t flags = ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
@@ -327,24 +334,53 @@ public:
       sim_.state_prev = next_prev;
     }
 
-    set_node_voltages(nodes);
+    set_node_voltages(nodes, true);
+    sim_.prev_solve = sim_.solve;
+    sim_.has_prev_solve = true;
+
     if (!has_prev_solve_) {
-      sim_.prev_solve = sim_.solve;
-      sim_.has_prev_solve = true;
+      std::uint32_t ic_flags = ANALYSIS_IC | CALC_RESIST_RESIDUAL |
+                               CALC_RESIST_LIM_RHS | CALC_REACT_RESIDUAL |
+                               CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM;
+      (void)inst_.eval_with_time(model_->model(), sim_, ic_flags, time);
+      if (sim_.state_prev.size() == sim_.state_next.size()) {
+        sim_.state_prev.swap(sim_.state_next);
+      }
     }
-
+    int num_states = state_count();
     double alpha = 1.0 / delta_t;
-    inst_.solve_internal_nodes_tran(model_->model(), sim_, time, alpha, 200, 1e-9);
-
-    std::uint32_t flags = ANALYSIS_TRAN | CALC_RESIST_JACOBIAN | CALC_RESIST_RESIDUAL |
-                          CALC_RESIST_LIM_RHS | CALC_REACT_JACOBIAN |
-                          CALC_REACT_RESIDUAL | CALC_REACT_LIM_RHS |
-                          CALC_OP | ENABLE_LIM | INIT_LIM;
-    (void)inst_.eval_with_time(model_->model(), sim_, flags, time);
-    sim_.clear();
-    inst_.load_residuals(model_->model(), sim_);
-    inst_.load_jacobian(model_->model(), sim_);
-    inst_.load_spice_rhs_tran(model_->model(), sim_, alpha);
+    if (num_states > 0) {
+      sim_.set_sim_param("dt", delta_t);
+      sim_.set_sim_param("delta_t", delta_t);
+      sim_.set_sim_param("delta", delta_t);
+      sim_.set_sim_param("h", delta_t);
+      sim_.set_sim_param("step", delta_t);
+      sim_.set_sim_param("alpha", alpha);
+      sim_.set_sim_param("t", time);
+      sim_.set_sim_param("time", time);
+      sim_.set_sim_param("abstime", time);
+    }
+    if (num_states == 0) {
+      solve_internal_nodes();
+      std::uint32_t flags = ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
+                            CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
+                            CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
+                            CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM;
+      (void)inst_.eval(model_->model(), sim_, flags);
+      sim_.clear();
+      inst_.load_residuals(model_->model(), sim_);
+    } else {
+      inst_.solve_internal_nodes_tran(model_->model(), sim_, time, alpha, 200, 1e-9);
+      std::uint32_t flags = ANALYSIS_TRAN | CALC_RESIST_JACOBIAN | CALC_RESIST_RESIDUAL |
+                            CALC_RESIST_LIM_RHS | CALC_REACT_JACOBIAN |
+                            CALC_REACT_RESIDUAL | CALC_REACT_LIM_RHS |
+                            CALC_OP | ENABLE_LIM | INIT_LIM;
+      (void)inst_.eval_with_time(model_->model(), sim_, flags, time);
+      sim_.clear();
+      inst_.load_residuals(model_->model(), sim_);
+      inst_.load_jacobian_tran(model_->model(), sim_, alpha);
+      inst_.load_spice_rhs_tran(model_->model(), sim_, alpha);
+    }
 
     std::vector<double> total_residual(sim_.residual_resist.size(), 0.0);
     for (std::size_t i = 0; i < total_residual.size(); ++i) {
@@ -352,11 +388,15 @@ public:
     }
 
     py::dict out;
-    out["id"] = read_current_from(total_residual, "d");
-    out["ig"] = read_current_from(total_residual, "g");
-    out["is"] = read_current_from(total_residual, "s");
-    out["ie"] = read_current_from(total_residual, "e");
-
+    auto read_terminal_current = [&](const std::string &term,
+                                     const std::string &internal) -> double {
+      auto it_internal = sim_.node_index.find(internal);
+      if (it_internal != sim_.node_index.end() &&
+          it_internal->second < sim_.residual_resist.size()) {
+        return sim_.residual_resist[it_internal->second];
+      }
+      return read_current(term);
+    };
     double qg = 0.0, qd = 0.0, qs = 0.0, qb = 0.0;
     read_opvar("qg", "qgate", qg);
     read_opvar("qd", "qdrain", qd);
@@ -368,6 +408,32 @@ public:
     out["qd"] = qd;
     out["qs"] = qs;
     out["qb"] = qb;
+    if (num_states == 0) {
+      double dqg_dt = 0.0;
+      double dqd_dt = 0.0;
+      double dqs_dt = 0.0;
+      double dqb_dt = 0.0;
+      if (has_prev_q_) {
+        dqg_dt = (qg - prev_qg_) * alpha;
+        dqd_dt = (qd - prev_qd_) * alpha;
+        dqs_dt = (qs - prev_qs_) * alpha;
+        dqb_dt = (qb - prev_qb_) * alpha;
+      }
+      out["id"] = read_terminal_current("d", "di") + dqd_dt;
+      out["ig"] = read_current("g") + dqg_dt;
+      out["is"] = read_terminal_current("s", "si") + dqs_dt;
+      out["ie"] = read_current("e") + dqb_dt;
+      prev_qg_ = qg;
+      prev_qd_ = qd;
+      prev_qs_ = qs;
+      prev_qb_ = qb;
+      has_prev_q_ = true;
+    } else {
+      out["id"] = read_current_from(total_residual, "d");
+      out["ig"] = read_current_from(total_residual, "g");
+      out["is"] = read_current_from(total_residual, "s");
+      out["ie"] = read_current_from(total_residual, "e");
+    }
 
     sim_.prev_solve = sim_.solve;
     has_prev_solve_ = true;
@@ -387,7 +453,7 @@ private:
     double cdd = 0.0;
   };
 
-  void set_node_voltages(const py::dict &nodes) {
+  void set_node_voltages(const py::dict &nodes, bool seed_internal) {
     auto set_or_default = [&](const std::string &name) {
       double value = 0.0;
       py::str key(name);
@@ -401,11 +467,13 @@ private:
     set_or_default("s");
     set_or_default("e");
 
-    if (sim_.node_index.count("di") && !nodes.contains(py::str("di"))) {
-      sim_.set_voltage("di", sim_.solve[sim_.node_index["d"]]);
-    }
-    if (sim_.node_index.count("si") && !nodes.contains(py::str("si"))) {
-      sim_.set_voltage("si", sim_.solve[sim_.node_index["s"]]);
+    if (seed_internal) {
+      if (sim_.node_index.count("di") && !nodes.contains(py::str("di"))) {
+        sim_.set_voltage("di", sim_.solve[sim_.node_index["d"]]);
+      }
+      if (sim_.node_index.count("si") && !nodes.contains(py::str("si"))) {
+        sim_.set_voltage("si", sim_.solve[sim_.node_index["s"]]);
+      }
     }
   }
 
@@ -674,6 +742,11 @@ private:
   double temperature_ = 300.15;
   std::uint32_t connected_terminals_ = 0;
   bool has_prev_solve_ = false;
+  bool has_prev_q_ = false;
+  double prev_qg_ = 0.0;
+  double prev_qd_ = 0.0;
+  double prev_qs_ = 0.0;
+  double prev_qb_ = 0.0;
 };
 
 }  // namespace
@@ -694,6 +767,7 @@ PYBIND11_MODULE(_pycmg, m) {
            py::arg("params"),
            py::arg("allow_rebind") = false)
       .def("internal_node_count", &PycmgInstance::internal_node_count)
+      .def("state_count", &PycmgInstance::state_count)
       .def("eval_dc", &PycmgInstance::eval_dc, py::arg("nodes"))
       .def("eval_tran", &PycmgInstance::eval_tran,
            py::arg("nodes"),

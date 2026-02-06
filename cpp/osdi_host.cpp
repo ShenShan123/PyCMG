@@ -284,6 +284,7 @@ OsdiSimulation::OsdiSimulation() {
   prev_solve.push_back(0.0);
   jacobian_info.emplace_back(0, 0);
   jacobian_index.emplace(0, 0);
+  sim_param_storage.emplace_back();
   sim_param_names.push_back(nullptr);
   sim_param_names_str.push_back(nullptr);
   sim_param_vals.push_back(0.0);
@@ -349,6 +350,33 @@ void OsdiSimulation::set_voltage(const std::string &node, double voltage) {
     throw std::runtime_error("unknown node: " + node);
   }
   solve[it->second] = voltage;
+}
+
+void OsdiSimulation::set_sim_param(const std::string &name, double value) {
+  for (std::size_t i = 0; i < sim_param_names.size(); ++i) {
+    if (sim_param_names[i] == nullptr) {
+      break;
+    }
+    if (name == sim_param_names[i]) {
+      sim_param_vals[i] = value;
+      return;
+    }
+  }
+  std::size_t insert_pos = 0;
+  while (insert_pos < sim_param_names.size() && sim_param_names[insert_pos] != nullptr) {
+    ++insert_pos;
+  }
+  sim_param_storage.push_back(name);
+  if (insert_pos >= sim_param_names.size()) {
+    sim_param_names.push_back(sim_param_storage.back().c_str());
+    sim_param_vals.push_back(value);
+    sim_param_names.push_back(nullptr);
+    sim_param_vals.push_back(0.0);
+  } else {
+    sim_param_names.insert(sim_param_names.begin() + static_cast<std::ptrdiff_t>(insert_pos),
+                           sim_param_storage.back().c_str());
+    sim_param_vals.insert(sim_param_vals.begin() + static_cast<std::ptrdiff_t>(insert_pos), value);
+  }
 }
 
 OsdiInstance::OsdiInstance(const OsdiDescriptor *descriptor) : descriptor_(descriptor) {
@@ -687,7 +715,7 @@ bool OsdiInstance::solve_internal_nodes_tran(
     eval_with_time(model, sim, flags, abstime);
     sim.clear();
     load_residuals(model, sim);
-    load_jacobian(model, sim);
+    load_jacobian_tran(model, sim, alpha);
     load_spice_rhs_tran(model, sim, alpha);
 
     std::vector<double> total_residual(sim.residual_resist.size(), 0.0);
@@ -717,7 +745,7 @@ bool OsdiInstance::solve_internal_nodes_tran(
       }
       int r = it_r->second;
       int c = it_c->second;
-      a[r * n + c] = sim.jacobian_resist[k] + alpha * sim.jacobian_react[k];
+      a[r * n + c] = sim.jacobian_resist[k];
     }
 
     std::vector<double> a_copy = a;

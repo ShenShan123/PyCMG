@@ -72,6 +72,7 @@ struct OsdiSimulation {
   std::vector<double> sim_param_vals;
   std::vector<const char *> sim_param_names_str;
   std::vector<const char *> sim_param_vals_str;
+  std::vector<std::string> sim_param_storage;
 
   OsdiSimulation();
   std::uint32_t register_node(const std::string &name);
@@ -80,6 +81,7 @@ struct OsdiSimulation {
   void build_jacobian();
   void clear();
   void set_voltage(const std::string &node, double voltage);
+  void set_sim_param(const std::string &name, double value);
 };
 
 class OsdiInstance {
