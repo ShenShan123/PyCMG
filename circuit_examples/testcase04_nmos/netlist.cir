@@ -1,0 +1,3 @@
+* instance sweep netlist
+X1 d g s e nmos1 L=3e-08 TFIN=1.5e-08 NFIN=1.0 NRS=2.0 NRD=1.0
+.end
