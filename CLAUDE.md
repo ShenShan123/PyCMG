@@ -54,6 +54,8 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
     2.  Run the Python Model Interface using identical parameters and voltage vectors.
     3.  Compare currents ($I_d, I_g$) and Derivatives ($g_m, g_{ds}$) numerically.
     4.  Assert accuracy within accepted tolerance (e.g., `1e-9`).
+* **Temperature sweeps:** Always apply `.temp` in NGSPICE and pass `temperature` (K) to `pycmg.Instance`.
+* **Stress tests:** Random OP points must compare **pycmg vs NGSPICE** (not osdi_eval). Use NGSPICE `.op` per point and compare I/Q/gm/gds/gmb within tolerances.
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).
@@ -84,6 +86,7 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 - Some OSDI params are integer-typed; read/write using `PARA_TY_INT` to avoid garbage values.
 - Internal-node DC solve must use residuals/Jacobian with cleared buffers; once params are correct, residuals match ngspice currents.
 - Do not pass `prev_solve` to OSDI unless it is explicitly initialized; uninitialized `prev_solve` breaks DC/AC comparisons.
+- Stress tests must align NGSPICE sign conventions: compare `i(vx)` directly to pycmg currents (no sign flip) for OP.
 
 ## Gap Checklist (Inventory vs Workflow)
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.

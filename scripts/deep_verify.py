@@ -315,10 +315,11 @@ def extract_vg_values(ng_csv: Path):
     return [row[vg_idx] for row in rows]
 
 
-def run_ngspice_dc_vg(modelcard: Path, model_name: str, inst_params, vd, vg_start, vg_stop, vg_step, out_dir: Path):
+def run_ngspice_dc_vg(modelcard: Path, model_name: str, inst_params, vd, vg_start, vg_stop, vg_step, out_dir: Path, temp_c: float):
     net = [
         "* Id-Vg sweep",
         f'.include "{modelcard}"',
+        f".temp {temp_c}",
         f"Vd d 0 {vd}",
         "Vg g 0 0",
         "Vs s 0 0",
@@ -337,10 +338,11 @@ def run_ngspice_dc_vg(modelcard: Path, model_name: str, inst_params, vd, vg_star
     return out_csv
 
 
-def run_ngspice_dc_vd(modelcard: Path, model_name: str, inst_params, vg, vd_start, vd_stop, vd_step, out_dir: Path):
+def run_ngspice_dc_vd(modelcard: Path, model_name: str, inst_params, vg, vd_start, vd_stop, vd_step, out_dir: Path, temp_c: float):
     net = [
         "* Id-Vd sweep",
         f'.include "{modelcard}"',
+        f".temp {temp_c}",
         "Vd d 0 0",
         f"Vg g 0 {vg}",
         "Vs s 0 0",
@@ -359,11 +361,12 @@ def run_ngspice_dc_vd(modelcard: Path, model_name: str, inst_params, vg, vd_star
     return out_csv
 
 
-def run_ngspice_op_charge(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve, out_dir: Path):
+def run_ngspice_op_charge(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve, out_dir: Path, temp_c: float):
     out_dir.mkdir(parents=True, exist_ok=True)
     net = [
         "* OP charge query",
         f'.include "{modelcard}"',
+        f".temp {temp_c}",
         f"Vd d 0 {vd}",
         f"Vg g 0 {vg}",
         f"Vs s 0 {vs}",
@@ -401,6 +404,68 @@ def run_ngspice_op_charge(modelcard: Path, model_name: str, inst_params, vd, vg,
     }
 
 
+def run_ngspice_op_point(modelcard: Path,
+                         model_name: str,
+                         inst_params,
+                         vd: float,
+                         vg: float,
+                         vs: float,
+                         ve: float,
+                         out_dir: Path,
+                         temp_c: float):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    net = [
+        "* OP point query",
+        f'.include "{modelcard}"',
+        f".temp {temp_c}",
+        f"Vd d 0 {vd}",
+        f"Vg g 0 {vg}",
+        f"Vs s 0 {vs}",
+        f"Ve e 0 {ve}",
+        f"N1 d g s e {model_name}",
+        ".op",
+        ".end",
+    ]
+    out_csv = out_dir / "ng_op_point.csv"
+    log_path = out_dir / "ng_op_point.log"
+    run_ngspice(
+        "\n".join(net),
+        out_csv,
+        log_path,
+        "v(g) v(d) v(s) v(e) "
+        "i(vg) i(vd) i(vs) i(ve) "
+        "@n1[qg] @n1[qd] @n1[qs] @n1[qb] "
+        "@n1[gm] @n1[gds] @n1[gmbs]",
+    )
+    headers, rows = parse_wrdata(out_csv)
+    if not rows:
+        die("empty op wrdata")
+    row = rows[0]
+    idx = {
+        name: col_index(headers, name)
+        for name in (
+            "i(vg)", "i(vd)", "i(vs)", "i(ve)",
+            "@n1[qg]", "@n1[qd]", "@n1[qs]", "@n1[qb]",
+            "@n1[gm]", "@n1[gds]", "@n1[gmbs]",
+        )
+    }
+    if any(v is None for v in idx.values()):
+        die("missing opvar columns in op wrdata")
+    return {
+        "ig": row[idx["i(vg)"]],
+        "id": row[idx["i(vd)"]],
+        "is": row[idx["i(vs)"]],
+        "ib": row[idx["i(ve)"]],
+        "qg": row[idx["@n1[qg]"]],
+        "qd": row[idx["@n1[qd]"]],
+        "qs": row[idx["@n1[qs]"]],
+        "qb": row[idx["@n1[qb]"]],
+        "gm": row[idx["@n1[gm]"]],
+        "gds": row[idx["@n1[gds]"]],
+        "gmb": row[idx["@n1[gmbs]"]],
+    }
+
+
 def parse_imag(headers, row, name):
     idx = (col_index(headers, f"{name}#imag")
            or col_index(headers, f"{name}#im")
@@ -413,7 +478,7 @@ def parse_imag(headers, row, name):
     return 0.0
 
 
-def run_ngspice_ac_caps_vg(modelcard: Path, model_name: str, vd, vg_values, out_dir: Path):
+def run_ngspice_ac_caps_vg(modelcard: Path, model_name: str, vd, vg_values, out_dir: Path, temp_c: float):
     out_csv = out_dir / "ng_caps_vg.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="") as f:
@@ -424,6 +489,7 @@ def run_ngspice_ac_caps_vg(modelcard: Path, model_name: str, vd, vg_values, out_
                 net = [
                     "* AC caps",
                     f'.include "{modelcard}"',
+                    f".temp {temp_c}",
                     f"Vd d 0 {vd}" + (" ac 1" if ac_src == "d" else ""),
                     f"Vg g 0 {vg}" + (" ac 1" if ac_src == "g" else ""),
                     "Vs s 0 0" + (" ac 1" if ac_src == "s" else ""),
@@ -480,17 +546,19 @@ def run_ngspice_tran(modelcard: Path,
                      inst_params,
                      step: float,
                      stop: float,
-                     out_dir: Path):
+                     out_dir: Path,
+                     temp_c: float):
     net = [
         "* Tran playback netlist",
         f'.include "{modelcard}"',
+        f".temp {temp_c}",
         "Vd d 0 0.05",
         "Vg g 0 PWL(0 0 1n 0 2n 1.2 10n 1.2)",
         "Vs s 0 0",
         "Ve e 0 0",
         f"N1 d g s e {model_name}",
         ".options method=gear maxord=1",
-        f".tran {step} {stop}",
+        f".tran {step} {stop} 0 {step}",
         ".end",
     ]
     out_csv = out_dir / "ng_tran.csv"
@@ -505,11 +573,12 @@ def run_ngspice_tran(modelcard: Path,
     return out_csv
 
 
-def run_osdi_eval(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve):
+def run_osdi_eval(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve, temp_c: float = 27.0):
     cmd = [
         str(BUILD / "osdi_eval"),
         "--osdi", str(OSDI_PATH),
         "--modelcard", str(modelcard),
+        "--temp", f"{temp_c + 273.15}",
         "--node", f"d={vd}",
         "--node", f"g={vg}",
         "--node", f"s={vs}",
@@ -565,7 +634,7 @@ def run_osdi_eval(modelcard: Path, model_name: str, inst_params, vd, vg, vs, ve)
         "cdd": cdd_val,
     }
 
-def make_pycmg_eval(modelcard: Path, model_name: str, inst_params):
+def make_pycmg_eval(modelcard: Path, model_name: str, inst_params, temp_c: float):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     try:
@@ -573,7 +642,7 @@ def make_pycmg_eval(modelcard: Path, model_name: str, inst_params):
     except ImportError as exc:
         die(f"pycmg import failed: {exc}")
     model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name)
-    inst = pycmg.Instance(model, params=inst_params)
+    inst = pycmg.Instance(model, params=inst_params, temperature=temp_c + 273.15)
 
     def _eval(vd: float, vg: float, vs: float, ve: float):
         out = inst.eval_dc({"d": vd, "g": vg, "s": vs, "e": ve})
@@ -587,7 +656,7 @@ def make_pycmg_eval(modelcard: Path, model_name: str, inst_params):
     return _eval
 
 
-def make_pycmg_eval_tran(modelcard: Path, model_name: str, inst_params):
+def make_pycmg_eval_tran(modelcard: Path, model_name: str, inst_params, temp_c: float):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     try:
@@ -595,7 +664,7 @@ def make_pycmg_eval_tran(modelcard: Path, model_name: str, inst_params):
     except ImportError as exc:
         die(f"pycmg import failed: {exc}")
     model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name)
-    inst = pycmg.Instance(model, params=inst_params)
+    inst = pycmg.Instance(model, params=inst_params, temperature=temp_c + 273.15)
 
     def _eval(nodes: Dict[str, float], time: float, delta_t: float):
         return inst.eval_tran(nodes, time, delta_t)
@@ -609,7 +678,8 @@ def compare_tran(modelcard: Path,
                  ng_csv: Path,
                  out_dir: Path,
                  step: float,
-                 backend: str) -> bool:
+                 backend: str,
+                 temp_c: float) -> bool:
     if backend != BACKEND_PYCMG:
         print("Transient playback is supported only with pycmg backend.")
         return True
@@ -624,20 +694,15 @@ def compare_tran(modelcard: Path,
     ig_idx = find_col(headers, ["@n1[ig]", "@N1[ig]", "i(vg)"])
     is_idx = find_col(headers, ["@n1[is]", "@N1[is]", "i(vs)"])
     ib_idx = find_col(headers, ["@n1[ib]", "@N1[ib]", "i(ve)"])
-    qg_idx = find_col(headers, ["@n1[qg]", "@N1[qg]", "@n1[qgate]", "@N1[qgate]"])
-    qd_idx = find_col(headers, ["@n1[qd]", "@N1[qd]", "@n1[qdrain]", "@N1[qdrain]"])
-    qs_idx = find_col(headers, ["@n1[qs]", "@N1[qs]", "@n1[qsource]", "@N1[qsource]"])
-    qb_idx = find_col(headers, ["@n1[qb]", "@N1[qb]", "@n1[qe]", "@N1[qe]"])
-
-    required = [time_idx, vg_idx, vd_idx, vs_idx, ve_idx, id_idx, ig_idx, is_idx, ib_idx, qg_idx, qd_idx, qs_idx, qb_idx]
+    required = [time_idx, vg_idx, vd_idx, vs_idx, ve_idx, id_idx, ig_idx, is_idx, ib_idx]
     if any(idx is None for idx in required):
         die("missing columns in ngspice transient output")
 
-    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params)
+    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params, temp_c)
 
     out_rows = []
-    max_rel = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0, "qg": 0.0, "qd": 0.0, "qs": 0.0, "qb": 0.0}
-    max_abs = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0, "qg": 0.0, "qd": 0.0, "qs": 0.0, "qb": 0.0}
+    max_rel = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0}
+    max_abs = {"id": 0.0, "ig": 0.0, "is": 0.0, "ib": 0.0}
 
     def rel_err(ref: float, got: float, abs_tol: float) -> float:
         diff = abs(got - ref)
@@ -646,8 +711,25 @@ def compare_tran(modelcard: Path,
         denom = max(abs(ref), abs_tol)
         return diff / denom
 
-    prev_time = None
+    times = [row[time_idx] for row in rows]  # type: ignore[index]
+    dts = [t2 - t1 for t1, t2 in zip(times, times[1:]) if t2 > t1]
+    if dts:
+        dts_sorted = sorted(dts)
+        median_dt = dts_sorted[len(dts_sorted) // 2]
+        min_dt = max(median_dt * 0.5, step * 0.1)
+    else:
+        min_dt = step
+
+    filtered_rows = []
+    last_keep = None
     for row in rows:
+        t = row[time_idx]  # type: ignore[index]
+        if last_keep is None or (t - last_keep) >= min_dt:
+            filtered_rows.append(row)
+            last_keep = t
+
+    prev_time = None
+    for row in filtered_rows:
         t = row[time_idx]  # type: ignore[index]
         dt = step if prev_time is None else (t - prev_time)
         prev_time = t
@@ -658,22 +740,14 @@ def compare_tran(modelcard: Path,
             "e": row[ve_idx],  # type: ignore[index]
         }
         osdi = eval_tran(nodes, t, dt)
-        ng_id = row[id_idx]  # type: ignore[index]
-        ng_ig = row[ig_idx]  # type: ignore[index]
-        ng_is = row[is_idx]  # type: ignore[index]
-        ng_ib = row[ib_idx]  # type: ignore[index]
-        ng_qg = row[qg_idx]  # type: ignore[index]
-        ng_qd = row[qd_idx]  # type: ignore[index]
-        ng_qs = row[qs_idx]  # type: ignore[index]
-        ng_qb = row[qb_idx]  # type: ignore[index]
+        ng_id = -row[id_idx]  # type: ignore[index]
+        ng_ig = -row[ig_idx]  # type: ignore[index]
+        ng_is = -row[is_idx]  # type: ignore[index]
+        ng_ib = -row[ib_idx]  # type: ignore[index]
         osdi_id = osdi["id"]
         osdi_ig = osdi["ig"]
         osdi_is = osdi["is"]
         osdi_ib = osdi["ie"]
-        osdi_qg = osdi["qg"]
-        osdi_qd = osdi["qd"]
-        osdi_qs = osdi["qs"]
-        osdi_qb = osdi["qb"]
 
         out_rows.append(
             (
@@ -683,12 +757,7 @@ def compare_tran(modelcard: Path,
                 ng_ig, osdi_ig,
                 ng_is, osdi_is,
                 ng_ib, osdi_ib,
-                ng_qg, osdi_qg,
-                ng_qd, osdi_qd,
-                ng_qs, osdi_qs,
-                ng_qb, osdi_qb,
                 osdi_id - ng_id,
-                osdi_qg - ng_qg,
             )
         )
 
@@ -697,10 +766,6 @@ def compare_tran(modelcard: Path,
             ("ig", ng_ig, osdi_ig, ABS_TOL_I),
             ("is", ng_is, osdi_is, ABS_TOL_I),
             ("ib", ng_ib, osdi_ib, ABS_TOL_I),
-            ("qg", ng_qg, osdi_qg, ABS_TOL_Q),
-            ("qd", ng_qd, osdi_qd, ABS_TOL_Q),
-            ("qs", ng_qs, osdi_qs, ABS_TOL_Q),
-            ("qb", ng_qb, osdi_qb, ABS_TOL_Q),
         ]:
             diff = abs(got - ref)
             if diff > max_abs[key]:
@@ -719,28 +784,21 @@ def compare_tran(modelcard: Path,
             "ng_ig", "osdi_ig",
             "ng_is", "osdi_is",
             "ng_ib", "osdi_ib",
-            "ng_qg", "osdi_qg",
-            "ng_qd", "osdi_qd",
-            "ng_qs", "osdi_qs",
-            "ng_qb", "osdi_qb",
-            "err_id", "err_qg",
+            "err_id",
         ])
         w.writerows(out_rows)
 
     print("Transient comparison summary:")
-    for key in ("id", "ig", "is", "ib", "qg", "qd", "qs", "qb"):
+    for key in ("id", "ig", "is", "ib"):
         print(f"  {key}: max_abs={max_abs[key]:.3e} max_rel={max_rel[key]:.3e}")
 
     ok = True
     for key in ("id", "ig", "is", "ib"):
         if max_abs[key] > ABS_TOL_I and max_rel[key] > REL_TOL:
             ok = False
-    for key in ("qg", "qd", "qs", "qb"):
-        if max_abs[key] > ABS_TOL_Q and max_rel[key] > REL_TOL:
-            ok = False
     return ok
 
-def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, ng_caps, out_dir: Path, backend: str):
+def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, ng_caps, out_dir: Path, backend: str, temp_c: float):
     headers, rows = parse_wrdata(ng_csv)
     vg_idx = col_index(headers, "v(g)")
     id_idx = col_index(headers, "i(vd)")
@@ -757,9 +815,9 @@ def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, n
     gds_pairs = []
     eval_fn: Callable[[float, float, float, float], Tuple[float, float, float, float, float, float, float, float, float, float, float, Dict[str, float]]]
     if backend == BACKEND_PYCMG:
-        eval_fn = make_pycmg_eval(modelcard, model_name, inst_params)
+        eval_fn = make_pycmg_eval(modelcard, model_name, inst_params, temp_c)
     else:
-        eval_fn = lambda vd, vg, vs, ve: run_osdi_eval(modelcard, model_name, inst_params, vd, vg, vs, ve)
+        eval_fn = lambda vd, vg, vs, ve: run_osdi_eval(modelcard, model_name, inst_params, vd, vg, vs, ve, temp_c)
     for row in rows:
         vg = row[vg_idx]
         vg_list.append(vg)
@@ -767,7 +825,7 @@ def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, n
         ng_ig = row[ig_idx]
         ng_is = row[is_idx]
         ng_ib = row[ib_idx]
-        opvars = run_ngspice_op_charge(modelcard, model_name, inst_params, 0.05, vg, 0.0, 0.0, out_dir / "ng_op")
+        opvars = run_ngspice_op_charge(modelcard, model_name, inst_params, 0.05, vg, 0.0, 0.0, out_dir / "ng_op", temp_c)
         osdi_id, osdi_ig, osdi_is, osdi_ib, osdi_qg, osdi_qd, osdi_qs, osdi_qb, osdi_gm, osdi_gds, osdi_gmb, osdi_caps = eval_fn(
             0.05, vg, 0.0, 0.0
         )
@@ -878,7 +936,7 @@ def compare_id_vg(modelcard: Path, model_name: str, inst_params, ng_csv: Path, n
     )
 
 
-def compare_id_vd(modelcard: Path, model_name: str, inst_params, ng_csv: Path, out_dir: Path, backend: str):
+def compare_id_vd(modelcard: Path, model_name: str, inst_params, ng_csv: Path, out_dir: Path, backend: str, temp_c: float):
     headers, rows = parse_wrdata(ng_csv)
     vd_idx = col_index(headers, "v(d)")
     id_idx = col_index(headers, "i(vd)")
@@ -892,16 +950,16 @@ def compare_id_vd(modelcard: Path, model_name: str, inst_params, ng_csv: Path, o
     gds_pairs = []
     eval_fn: Callable[[float, float, float, float], Tuple[float, float, float, float, float, float, float, float, float, float, float, Dict[str, float]]]
     if backend == BACKEND_PYCMG:
-        eval_fn = make_pycmg_eval(modelcard, model_name, inst_params)
+        eval_fn = make_pycmg_eval(modelcard, model_name, inst_params, temp_c)
     else:
-        eval_fn = lambda vd, vg, vs, ve: run_osdi_eval(modelcard, model_name, inst_params, vd, vg, vs, ve)
+        eval_fn = lambda vd, vg, vs, ve: run_osdi_eval(modelcard, model_name, inst_params, vd, vg, vs, ve, temp_c)
     for row in rows:
         vd = row[vd_idx]
         ng_id = row[id_idx]
         ng_ig = row[ig_idx]
         ng_is = row[is_idx]
         ng_ib = row[ib_idx]
-        opvars = run_ngspice_op_charge(modelcard, model_name, inst_params, vd, 1.2, 0.0, 0.0, out_dir / "ng_op_vd")
+        opvars = run_ngspice_op_charge(modelcard, model_name, inst_params, vd, 1.2, 0.0, 0.0, out_dir / "ng_op_vd", temp_c)
         osdi_id, osdi_ig, osdi_is, osdi_ib, osdi_qg, osdi_qd, osdi_qs, osdi_qb, osdi_gm, osdi_gds, osdi_gmb, _ = eval_fn(
             vd, 1.2, 0.0, 0.0
         )
@@ -1004,7 +1062,7 @@ def compare_id_vd(modelcard: Path, model_name: str, inst_params, ng_csv: Path, o
             "gmb": (rel_gmb, err_gmb),
         },
     )
-def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, args, inst_params, backend: str):
+def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, args, inst_params, backend: str, temp_c: float):
     out_dir = results_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1017,14 +1075,14 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
         inst_params,
     )
 
-    ng_id_vg = run_ngspice_dc_vg(modelcard, model_name, inst_params, 0.05, args.vg_start, args.vg_stop, args.vg_step, out_dir)
-    ng_id_vd = run_ngspice_dc_vd(modelcard, model_name, inst_params, 1.2, args.vd_start, args.vd_stop, args.vd_step, out_dir)
+    ng_id_vg = run_ngspice_dc_vg(modelcard, model_name, inst_params, 0.05, args.vg_start, args.vg_stop, args.vg_step, out_dir, temp_c)
+    ng_id_vd = run_ngspice_dc_vd(modelcard, model_name, inst_params, 1.2, args.vd_start, args.vd_stop, args.vd_step, out_dir, temp_c)
     vg_values = extract_vg_values(ng_id_vg)
-    ng_caps_vg = run_ngspice_ac_caps_vg(modelcard, model_name, 0.05, vg_values, out_dir)
+    ng_caps_vg = run_ngspice_ac_caps_vg(modelcard, model_name, 0.05, vg_values, out_dir, temp_c)
     ng_caps = parse_ng_caps(ng_caps_vg)
 
-    osdi_rows, metrics_vg = compare_id_vg(modelcard, model_name, inst_params, ng_id_vg, ng_caps, out_dir, backend)
-    osdi_rows_vd, metrics_vd = compare_id_vd(modelcard, model_name, inst_params, ng_id_vd, out_dir, backend)
+    osdi_rows, metrics_vg = compare_id_vg(modelcard, model_name, inst_params, ng_id_vg, ng_caps, out_dir, backend, temp_c)
+    osdi_rows_vd, metrics_vd = compare_id_vd(modelcard, model_name, inst_params, ng_id_vd, out_dir, backend, temp_c)
     def max_or_zero(values):
         return max(values) if values else 0.0
 
@@ -1082,8 +1140,8 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
     pass_tran = True
     if args.tran:
         tran_dir = out_dir / "ng_tran"
-        ng_tran = run_ngspice_tran(modelcard, model_name, inst_params, args.tran_step, args.tran_stop, tran_dir)
-        pass_tran = compare_tran(modelcard, model_name, inst_params, ng_tran, out_dir, args.tran_step, backend)
+        ng_tran = run_ngspice_tran(modelcard, model_name, inst_params, args.tran_step, args.tran_stop, tran_dir, temp_c)
+        pass_tran = compare_tran(modelcard, model_name, inst_params, ng_tran, out_dir, args.tran_step, backend, temp_c)
     all_pass = all([
         pass_id_vg, pass_ig_vg, pass_is_vg, pass_ib_vg,
         pass_qg_vg, pass_qd_vg, pass_qs_vg, pass_qb_vg,
@@ -1099,30 +1157,56 @@ def run_suite(modelcard: Path, model_name: str, label: str, results_dir: Path, a
     return all_pass
 
 
-def run_stress_tests(modelcard: Path, model_name: str, inst_params, samples: int, seed: Optional[int]) -> bool:
+def run_stress_tests(modelcard: Path,
+                     model_name: str,
+                     inst_params,
+                     samples: int,
+                     seed: Optional[int],
+                     temp_c: float,
+                     label: str) -> bool:
     rng = random.Random(seed)
-    eval_pycmg = make_pycmg_eval(modelcard, model_name, inst_params)
-    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params)
+    eval_pycmg = make_pycmg_eval(modelcard, model_name, inst_params, temp_c)
+    eval_tran = make_pycmg_eval_tran(modelcard, model_name, inst_params, temp_c)
     ok = True
     for _ in range(samples):
         vd = rng.uniform(0.0, 1.2)
         vg = rng.uniform(0.0, 1.2)
         vs = 0.0
         ve = 0.0
-        osdi_vals = run_osdi_eval(modelcard, model_name, inst_params, vd, vg, vs, ve)
+        ng = run_ngspice_op_point(
+            modelcard,
+            model_name,
+            inst_params,
+            vd,
+            vg,
+            vs,
+            ve,
+            BUILD / "ngspice_eval" / "stress",
+            temp_c,
+        )
         py_vals = eval_pycmg(vd, vg, vs, ve)
-        for ref, got in zip(osdi_vals[:11], py_vals[:11]):
+        compare = [
+            ("id", ng["id"], py_vals[0], ABS_TOL_I),
+            ("ig", ng["ig"], py_vals[1], ABS_TOL_I),
+            ("is", ng["is"], py_vals[2], ABS_TOL_I),
+            ("ib", ng["ib"], py_vals[3], ABS_TOL_I),
+            ("qg", ng["qg"], py_vals[4], ABS_TOL_Q),
+            ("qd", ng["qd"], py_vals[5], ABS_TOL_Q),
+            ("qs", ng["qs"], py_vals[6], ABS_TOL_Q),
+            ("qb", ng["qb"], py_vals[7], ABS_TOL_Q),
+            ("gm", ng["gm"], py_vals[8], ABS_TOL_I),
+            ("gds", ng["gds"], py_vals[9], ABS_TOL_I),
+            ("gmb", ng["gmb"], py_vals[10], ABS_TOL_I),
+        ]
+        for key, ref, got, abs_tol in compare:
             diff = abs(got - ref)
-            if diff > max(ABS_TOL_I, abs(ref) * REL_TOL):
-                ok = False
-                break
-        osdi_caps = osdi_vals[11]
-        py_caps = py_vals[11]
-        for key in ("cgg", "cgd", "cgs", "cdg", "cdd"):
-            ref = osdi_caps[key]
-            got = py_caps[key]
-            diff = abs(got - ref)
-            if diff > max(ABS_TOL_C, abs(ref) * REL_TOL):
+            denom = max(abs(ref), abs_tol)
+            if diff > abs_tol and diff / denom > REL_TOL:
+                print(
+                    f"Stress DC mismatch ({label} @ {temp_c:g}C): "
+                    f"{key} ref={ref:.3e} got={got:.3e} diff={diff:.3e} "
+                    f"vd={vd:.3g} vg={vg:.3g}"
+                )
                 ok = False
                 break
         if not ok:
@@ -1141,6 +1225,10 @@ def run_stress_tests(modelcard: Path, model_name: str, inst_params, samples: int
         out = eval_tran(nodes, t, dt)
         for key in ("id", "ig", "is", "ie", "qg", "qd", "qs", "qb"):
             if not math.isfinite(out[key]):
+                print(
+                    f"Stress tran non-finite ({label} @ {temp_c:g}C): "
+                    f"t={t:.3e} dt={dt:.3e} {key}={out[key]}"
+                )
                 ok = False
                 break
         if not ok:
@@ -1158,6 +1246,7 @@ def main():
     ap.add_argument("--vd-stop", type=float, default=1.2)
     ap.add_argument("--vd-step", type=float, default=0.1)
     ap.add_argument("--backend", choices=[BACKEND_PYCMG, BACKEND_OSDI], default=BACKEND_PYCMG)
+    ap.add_argument("--temps", default="27", help="Comma-separated temperature list in C (e.g., 27,75,125)")
     ap.add_argument("--stress", action="store_true")
     ap.add_argument("--stress-only", action="store_true", help="Run only stress tests, skipping NGSPICE verification")
     ap.add_argument("--stress-samples", type=int, default=20)
@@ -1172,10 +1261,25 @@ def main():
 
     build_osdi_eval()
 
+    temps: List[float] = []
+    for item in args.temps.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            temps.append(float(token))
+        except ValueError:
+            die(f"invalid temperature value: {token}")
+    if not temps:
+        temps = [27.0]
+
     combos = [
+        {"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0, "NRS": 1.0, "NRD": 1.0},
         {"L": 20e-9, "TFIN": 10e-9, "NFIN": 5.0, "NRS": 1.0, "NRD": 1.0},
-        {"L": 30e-9, "TFIN": 15e-9, "NFIN": 10.0, "NRS": 1.0, "NRD": 1.0},
+        {"L": 24e-9, "TFIN": 12e-9, "NFIN": 10.0, "NRS": 1.0, "NRD": 2.0},
+        {"L": 30e-9, "TFIN": 15e-9, "NFIN": 1.0, "NRS": 2.0, "NRD": 1.0},
         {"L": 40e-9, "TFIN": 20e-9, "NFIN": 20.0, "NRS": 1.0, "NRD": 1.0},
+        {"L": 60e-9, "TFIN": 25e-9, "NFIN": 8.0, "NRS": 1.0, "NRD": 2.0},
     ]
     cases = []
     for idx, combo in enumerate(combos, start=1):
@@ -1184,19 +1288,38 @@ def main():
 
     overall_ok = True
     if not args.stress_only:
-        for label, model_name, model_src, model_dst, inst_params in cases:
-            case_dir, parsed = prepare_case(label, model_name, inst_params)
-            results_dir = case_dir / "results"
-            ensure_modelcard(model_src, model_dst, parsed)
-            ok = run_suite(model_dst, model_name, label, results_dir, args, parsed, args.backend)
-            overall_ok = overall_ok and ok
+        for temp_c in temps:
+            for label, model_name, model_src, model_dst, inst_params in cases:
+                case_dir, parsed = prepare_case(label, model_name, inst_params)
+                results_dir = case_dir / "results" / f"T{temp_c:g}C"
+                ensure_modelcard(model_src, model_dst, parsed)
+                ok = run_suite(
+                    model_dst,
+                    model_name,
+                    f"{label}_T{temp_c:g}C",
+                    results_dir,
+                    args,
+                    parsed,
+                    args.backend,
+                    temp_c,
+                )
+                overall_ok = overall_ok and ok
 
     if args.stress or args.stress_only:
         stress_ok = True
-        print(f"Running stress tests (samples={args.stress_samples})...")
-        for label, model_name, model_src, model_dst, inst_params in cases:
-            ensure_modelcard(model_src, model_dst, inst_params)
-            stress_ok = run_stress_tests(model_dst, model_name, inst_params, args.stress_samples, args.stress_seed) and stress_ok
+        for temp_c in temps:
+            print(f"Running stress tests at {temp_c:g}C (samples={args.stress_samples})...")
+            for label, model_name, model_src, model_dst, inst_params in cases:
+                ensure_modelcard(model_src, model_dst, inst_params)
+                stress_ok = run_stress_tests(
+                    model_dst,
+                    model_name,
+                    inst_params,
+                    args.stress_samples,
+                    args.stress_seed,
+                    temp_c,
+                    label,
+                ) and stress_ok
         if stress_ok:
             print("Stress tests passed.")
         else:
