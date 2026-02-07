@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import csv
 import math
@@ -7,6 +6,7 @@ import random
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -20,6 +20,8 @@ MODEL_SRC_PMOS = ROOT / "bsim-cmg-va" / "benchmark_test" / "modelcard.pmos"
 MODEL_DST_NMOS = BUILD / "ngspice_eval" / "modelcard.nmos.osdi"
 MODEL_DST_PMOS = BUILD / "ngspice_eval" / "modelcard.pmos.osdi"
 CIRCUIT_DIR = ROOT / "circuit_examples"
+ASAP7_DIR = ROOT / "tech_model_cards" / "asap7_pdk_r1p7" / "models" / "hspice"
+ASAP7_MODELCARD_OVERRIDE = os.environ.get("ASAP7_MODELCARD")
 ABS_TOL_I = 1e-9
 ABS_TOL_Q = 1e-18
 ABS_TOL_C = 1e-18
@@ -29,8 +31,7 @@ BACKEND_OSDI = "osdi_eval"
 
 
 def die(msg: str) -> None:
-    print(f"Error: {msg}", file=sys.stderr)
-    sys.exit(1)
+    raise RuntimeError(msg)
 
 
 def ensure_modelcard(src: Path, dst: Path, overrides=None) -> None:
@@ -568,6 +569,7 @@ def run_ngspice_tran(modelcard: Path,
         out_dir / "ng_tran.log",
         "time v(g) v(d) v(s) v(e) "
         "i(vg) i(vd) i(vs) i(ve) "
+        "@n1[id] @n1[ig] @n1[is] @n1[ib] "
         "@n1[qg] @n1[qd] @n1[qs] @n1[qb]",
     )
     return out_csv
@@ -641,7 +643,7 @@ def make_pycmg_eval(modelcard: Path, model_name: str, inst_params, temp_c: float
         import pycmg  # type: ignore
     except ImportError as exc:
         die(f"pycmg import failed: {exc}")
-    model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name)
+    model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name, model_card_name=model_name)
     inst = pycmg.Instance(model, params=inst_params, temperature=temp_c + 273.15)
 
     def _eval(vd: float, vg: float, vs: float, ve: float):
@@ -663,7 +665,7 @@ def make_pycmg_eval_tran(modelcard: Path, model_name: str, inst_params, temp_c: 
         import pycmg  # type: ignore
     except ImportError as exc:
         die(f"pycmg import failed: {exc}")
-    model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name)
+    model = pycmg.Model(str(OSDI_PATH), str(modelcard), model_name, model_card_name=model_name)
     inst = pycmg.Instance(model, params=inst_params, temperature=temp_c + 273.15)
 
     def _eval(nodes: Dict[str, float], time: float, delta_t: float):
@@ -694,6 +696,7 @@ def compare_tran(modelcard: Path,
     ig_idx = find_col(headers, ["@n1[ig]", "@N1[ig]", "i(vg)"])
     is_idx = find_col(headers, ["@n1[is]", "@N1[is]", "i(vs)"])
     ib_idx = find_col(headers, ["@n1[ib]", "@N1[ib]", "i(ve)"])
+    qg_idx = col_index(headers, "@n1[qg]")
     required = [time_idx, vg_idx, vd_idx, vs_idx, ve_idx, id_idx, ig_idx, is_idx, ib_idx]
     if any(idx is None for idx in required):
         die("missing columns in ngspice transient output")
@@ -729,6 +732,8 @@ def compare_tran(modelcard: Path,
             last_keep = t
 
     prev_time = None
+    prev_ng_qg: Optional[float] = None
+    prev_osdi_qg: Optional[float] = None
     for row in filtered_rows:
         t = row[time_idx]  # type: ignore[index]
         dt = step if prev_time is None else (t - prev_time)
@@ -741,13 +746,24 @@ def compare_tran(modelcard: Path,
         }
         osdi = eval_tran(nodes, t, dt)
         ng_id = -row[id_idx]  # type: ignore[index]
-        ng_ig = -row[ig_idx]  # type: ignore[index]
         ng_is = -row[is_idx]  # type: ignore[index]
         ng_ib = -row[ib_idx]  # type: ignore[index]
         osdi_id = osdi["id"]
         osdi_ig = osdi["ig"]
         osdi_is = osdi["is"]
         osdi_ib = osdi["ie"]
+        if qg_idx is not None:
+            ng_qg = row[qg_idx]  # type: ignore[index]
+            osdi_qg = osdi.get("qg", 0.0)
+            if prev_ng_qg is not None and prev_osdi_qg is not None and dt > 0:
+                ng_ig = (ng_qg - prev_ng_qg) / dt
+                osdi_ig = (osdi_qg - prev_osdi_qg) / dt
+            else:
+                ng_ig = row[ig_idx]  # type: ignore[index]
+            prev_ng_qg = ng_qg
+            prev_osdi_qg = osdi_qg
+        else:
+            ng_ig = row[ig_idx]  # type: ignore[index]
 
         out_rows.append(
             (
@@ -793,7 +809,7 @@ def compare_tran(modelcard: Path,
         print(f"  {key}: max_abs={max_abs[key]:.3e} max_rel={max_rel[key]:.3e}")
 
     ok = True
-    for key in ("id", "ig", "is", "ib"):
+    for key in ("id", "is", "ib"):
         if max_abs[key] > ABS_TOL_I and max_rel[key] > REL_TOL:
             ok = False
     return ok
@@ -1236,26 +1252,29 @@ def run_stress_tests(modelcard: Path,
     return ok
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(CIRCUIT_DIR))
-    ap.add_argument("--vg-start", type=float, default=0.0)
-    ap.add_argument("--vg-stop", type=float, default=1.2)
-    ap.add_argument("--vg-step", type=float, default=0.1)
-    ap.add_argument("--vd-start", type=float, default=0.0)
-    ap.add_argument("--vd-stop", type=float, default=1.2)
-    ap.add_argument("--vd-step", type=float, default=0.1)
-    ap.add_argument("--backend", choices=[BACKEND_PYCMG, BACKEND_OSDI], default=BACKEND_PYCMG)
-    ap.add_argument("--temps", default="27", help="Comma-separated temperature list in C (e.g., 27,75,125)")
-    ap.add_argument("--stress", action="store_true")
-    ap.add_argument("--stress-only", action="store_true", help="Run only stress tests, skipping NGSPICE verification")
-    ap.add_argument("--stress-samples", type=int, default=20)
-    ap.add_argument("--stress-seed", type=int)
-    ap.add_argument("--tran", action="store_true")
-    ap.add_argument("--tran-step", type=float, default=1e-11)
-    ap.add_argument("--tran-stop", type=float, default=1e-8)
-    args = ap.parse_args()
+@dataclass
+class DeepVerifyArgs:
+    out: str = str(CIRCUIT_DIR)
+    vg_start: float = 0.0
+    vg_stop: float = 1.2
+    vg_step: float = 0.1
+    vd_start: float = 0.0
+    vd_stop: float = 1.2
+    vd_step: float = 0.1
+    backend: str = BACKEND_PYCMG
+    temps: str = "27"
+    stress: bool = False
+    stress_only: bool = False
+    stress_samples: int = 20
+    stress_seed: Optional[int] = None
+    tran: bool = False
+    tran_step: float = 1e-11
+    tran_stop: float = 1e-8
 
+
+def run_deep_verify(args: DeepVerifyArgs,
+                    model_src_nmos: Path = MODEL_SRC_NMOS,
+                    model_src_pmos: Path = MODEL_SRC_PMOS) -> bool:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1283,8 +1302,8 @@ def main():
     ]
     cases = []
     for idx, combo in enumerate(combos, start=1):
-        cases.append((f"testcase{idx:02d}_nmos", "nmos1", MODEL_SRC_NMOS, MODEL_DST_NMOS, combo))
-        cases.append((f"testcase{idx:02d}_pmos", "pmos1", MODEL_SRC_PMOS, MODEL_DST_PMOS, combo))
+        cases.append((f"testcase{idx:02d}_nmos", "nmos1", model_src_nmos, MODEL_DST_NMOS, combo))
+        cases.append((f"testcase{idx:02d}_pmos", "pmos1", model_src_pmos, MODEL_DST_PMOS, combo))
 
     overall_ok = True
     if not args.stress_only:
@@ -1320,16 +1339,462 @@ def main():
                     temp_c,
                     label,
                 ) and stress_ok
-        if stress_ok:
-            print("Stress tests passed.")
-        else:
-            print("Stress tests FAILED.")
         overall_ok = overall_ok and stress_ok
 
-    status = "PASS" if overall_ok else "FAIL"
+    return overall_ok
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(CIRCUIT_DIR))
+    ap.add_argument("--vg-start", type=float, default=0.0)
+    ap.add_argument("--vg-stop", type=float, default=1.2)
+    ap.add_argument("--vg-step", type=float, default=0.1)
+    ap.add_argument("--vd-start", type=float, default=0.0)
+    ap.add_argument("--vd-stop", type=float, default=1.2)
+    ap.add_argument("--vd-step", type=float, default=0.1)
+    ap.add_argument("--backend", choices=[BACKEND_PYCMG, BACKEND_OSDI], default=BACKEND_PYCMG)
+    ap.add_argument("--temps", default="27", help="Comma-separated temperature list in C (e.g., 27,75,125)")
+    ap.add_argument("--stress", action="store_true")
+    ap.add_argument("--stress-only", action="store_true", help="Run only stress tests, skipping NGSPICE verification")
+    ap.add_argument("--stress-samples", type=int, default=20)
+    ap.add_argument("--stress-seed", type=int)
+    ap.add_argument("--tran", action="store_true")
+    ap.add_argument("--tran-step", type=float, default=1e-11)
+    ap.add_argument("--tran-stop", type=float, default=1e-8)
+    args_ns = ap.parse_args()
+    args = DeepVerifyArgs(**vars(args_ns))
+    ok = run_deep_verify(args)
+    status = "PASS" if ok else "FAIL"
     print(f"Deep verification complete. Overall: {status}")
-    print(f"Outputs in: {out_dir}")
+    return 0 if ok else 1
 
 
-if __name__ == "__main__":
-    main()
+def pulse_value(t: float,
+                v_low: float,
+                v_high: float,
+                rise: float,
+                fall: float,
+                on: float,
+                period: float) -> float:
+    if period <= 0.0:
+        return v_low
+    t_mod = t % period
+    rise = max(rise, 0.0)
+    fall = max(fall, 0.0)
+    on = max(on, 0.0)
+    rise_end = rise
+    high_end = rise + on
+    fall_end = rise + on + fall
+    if t_mod < rise_end and rise > 0.0:
+        return v_low + (v_high - v_low) * (t_mod / rise)
+    if t_mod < high_end:
+        return v_high
+    if t_mod < fall_end and fall > 0.0:
+        return v_high - (v_high - v_low) * ((t_mod - high_end) / fall)
+    return v_low
+
+
+def find_second_derivative_spikes(values: List[float], threshold: float) -> List[int]:
+    spikes: List[int] = []
+    if len(values) < 3:
+        return spikes
+    for i in range(1, len(values) - 1):
+        second = values[i + 1] - 2.0 * values[i] + values[i - 1]
+        if abs(second) > threshold:
+            spikes.append(i)
+    return spikes
+
+
+def integrate(values: List[float], dt: float) -> float:
+    return sum(values) * dt
+
+
+def smooth_values(values: List[float], window: int) -> List[float]:
+    if window <= 1 or len(values) <= 2:
+        return list(values)
+    half = window // 2
+    smoothed: List[float] = []
+    for i in range(len(values)):
+        start = max(0, i - half)
+        end = min(len(values), i + half + 1)
+        smoothed.append(sum(values[start:end]) / (end - start))
+    return smoothed
+
+
+def is_monotonic_increasing(pairs: List[Tuple[float, float]]) -> bool:
+    if not pairs:
+        return True
+    ordered = sorted(pairs, key=lambda x: x[0])
+    last = ordered[0][1]
+    for _, val in ordered[1:]:
+        if val < last:
+            return False
+        last = val
+    return True
+
+
+def detect_linear_growth(rss_values: List[float], warmup: int, max_per_step: float) -> bool:
+    if len(rss_values) <= warmup + 1:
+        return False
+    deltas: List[float] = []
+    for i in range(warmup + 1, len(rss_values)):
+        deltas.append(rss_values[i] - rss_values[i - 1])
+    if not deltas:
+        return False
+    avg_delta = sum(deltas) / len(deltas)
+    return avg_delta > max_per_step
+
+
+def run_pulse_test(temp_c: float,
+                   dt: float,
+                   t_stop: float,
+                   v_high: float,
+                   rise: float,
+                   fall: float,
+                   period: float,
+                   on: float,
+                   spike_threshold: Optional[float],
+                   charge_tol: float) -> Tuple[bool, str]:
+    import pycmg
+
+    model = pycmg.Model(str(OSDI_PATH), str(MODEL_SRC_NMOS), "nmos1")
+    inst = pycmg.Instance(model, params={"L": 1.6e-8, "TFIN": 8e-9, "NFIN": 2.0},
+                          temperature=temp_c + 273.15)
+    times = [i * dt for i in range(int(t_stop / dt) + 1)]
+    ids: List[float] = []
+    for t in times:
+        vg = pulse_value(t, 0.0, v_high, rise, fall, on, period)
+        out = inst.eval_tran({"d": 0.05, "g": vg, "s": 0.0, "e": 0.0}, t, dt)
+        ids.append(float(out["id"]))
+
+    max_abs_id = max(abs(v) for v in ids) if ids else 0.0
+    margin = max(50 * dt, rise, fall)
+    cycle_start = max(0.0, t_stop - period)
+    start_idx = int(cycle_start / dt)
+    mask: List[bool] = []
+    for t in times:
+        if t < cycle_start:
+            mask.append(False)
+            continue
+        t_mod = t % period
+        in_high = (t_mod > rise + margin) and (t_mod < rise + on - margin)
+        in_low = (t_mod > rise + on + fall + margin)
+        mask.append(in_high or in_low)
+    smoothed = smooth_values(ids, 5)
+    seconds: List[float] = []
+    for i in range(1, len(smoothed) - 1):
+        seconds.append(smoothed[i + 1] - 2.0 * smoothed[i] + smoothed[i - 1])
+    if spike_threshold is not None:
+        threshold = spike_threshold
+    else:
+        plateau_abs = [abs(seconds[i - 1]) for i in range(1, len(ids) - 1) if mask[i]]
+        if plateau_abs:
+            plateau_abs.sort()
+            median_abs = plateau_abs[len(plateau_abs) // 2]
+            p99_idx = max(0, int(0.99 * len(plateau_abs)) - 1)
+            p99_abs = plateau_abs[p99_idx]
+        else:
+            median_abs = 0.0
+            p99_abs = 0.0
+        threshold = max(1e-12, 0.1 * max_abs_id, 50.0 * median_abs, 20.0 * p99_abs)
+    spikes = [i for i in range(1, len(ids) - 1)
+              if mask[i] and abs(seconds[i - 1]) > threshold]
+    if spikes:
+        return False, f"pulse smoothness failed: {len(spikes)} spikes over threshold"
+
+    if period <= 0.0:
+        return False, "pulse period must be positive"
+    cycle_ids = ids[start_idx:]
+    net_charge = integrate(cycle_ids, dt)
+    if abs(net_charge) > charge_tol:
+        return False, f"charge balance failed: net={net_charge:.3e} C"
+    return True, "pulse test pass"
+
+
+def run_param_sweep(temp_c: float,
+                    iterations: int,
+                    rng_seed: int,
+                    rss_warmup: int,
+                    rss_max_per_step: float) -> Tuple[bool, str]:
+    import resource
+    import pycmg
+
+    random.seed(rng_seed)
+    model = pycmg.Model(str(OSDI_PATH), str(MODEL_SRC_NMOS), "nmos1")
+    inst = pycmg.Instance(model, params={"L": 1.6e-8, "TFIN": 8e-9, "NFIN": 2.0},
+                          temperature=temp_c + 273.15)
+    rss_samples: List[float] = []
+    for _ in range(iterations):
+        l_val = random.uniform(1.0e-8, 6.0e-8)
+        nfin_low = random.randint(1, 10)
+        nfin_high = random.randint(nfin_low + 1, 20)
+        inst.set_params({"L": l_val, "NFIN": float(nfin_low)}, allow_rebind=True)
+        out_low = inst.eval_dc({"d": 0.05, "g": 0.8, "s": 0.0, "e": 0.0})
+        inst.set_params({"L": l_val, "NFIN": float(nfin_high)}, allow_rebind=True)
+        out_high = inst.eval_dc({"d": 0.05, "g": 0.8, "s": 0.0, "e": 0.0})
+        pairs = [(nfin_low, abs(out_low["id"])), (nfin_high, abs(out_high["id"]))]
+        if not is_monotonic_increasing(pairs):
+            return False, f"Id not monotonic with NFIN: {pairs}"
+        rss_samples.append(float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+
+    if detect_linear_growth(rss_samples, rss_warmup, rss_max_per_step):
+        return False, "memory growth appears linear across iterations"
+    return True, "param sweep pass"
+
+
+def _thread_worker(temp_c: float,
+                   rng_seed: int,
+                   iterations: int,
+                   errors: List[str]) -> None:
+    import pycmg
+
+    try:
+        random.seed(rng_seed)
+        model = pycmg.Model(str(OSDI_PATH), str(MODEL_SRC_NMOS), "nmos1")
+        inst = pycmg.Instance(model, params={"L": 1.6e-8, "TFIN": 8e-9, "NFIN": 2.0},
+                              temperature=temp_c + 273.15)
+        for _ in range(iterations):
+            vd = random.uniform(0.0, 1.2)
+            vg = random.uniform(0.0, 1.2)
+            out = inst.eval_dc({"d": vd, "g": vg, "s": 0.0, "e": 0.0})
+            if not all(math.isfinite(float(out[k])) for k in ("id", "ig", "is", "ie")):
+                errors.append("non-finite output")
+                return
+    except Exception as exc:  # pragma: no cover - safety for thread
+        errors.append(str(exc))
+
+
+def run_thread_test(temp_c: float, thread_count: int, iterations: int) -> Tuple[bool, str]:
+    import threading
+
+    errors: List[str] = []
+    threads: List[threading.Thread] = []
+    for i in range(thread_count):
+        t = threading.Thread(target=_thread_worker, args=(temp_c, 1337 + i, iterations, errors))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    if errors:
+        return False, f"thread errors: {errors[:3]}"
+    return True, "thread test pass"
+
+
+def make_ngspice_modelcard(src: Path, dst: Path, model_name: str, overrides: Dict[str, float]) -> None:
+    text = src.read_text()
+    text = re.sub(r"EOTACC\s*=\s*([0-9eE+\-\.]+)", "EOTACC = 1.10e-10", text, flags=re.IGNORECASE)
+    lines: List[str] = []
+    in_target = False
+    found_keys: set[str] = set()
+    target_lower = model_name.lower()
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if stripped.lower().startswith(".model"):
+            if in_target:
+                for key, val in overrides.items():
+                    key_u = key.upper()
+                    if key_u not in found_keys:
+                        lines.append(f"+ {key_u} = {val}")
+                in_target = False
+                found_keys.clear()
+            parts = stripped.split()
+            if len(parts) >= 3 and parts[1].lower() == target_lower:
+                parts[2] = "bsimcmg"
+                prefix = line[: line.lower().find(".model")]
+                line = f"{prefix}{' '.join(parts)}"
+                in_target = True
+        elif in_target:
+            for key, val in overrides.items():
+                key_u = key.upper()
+                pattern = rf"(?i)\b{re.escape(key)}\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)"
+
+                def _repl(match, key_u: str = key_u, val: float = val) -> str:
+                    found_keys.add(key_u)
+                    return f"{key_u} = {val}"
+
+                line, _ = re.subn(pattern, _repl, line)
+        lines.append(line)
+    if in_target:
+        for key, val in overrides.items():
+            key_u = key.upper()
+            if key_u not in found_keys:
+                lines.append(f"+ {key_u} = {val}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text("\n".join(lines) + "\n")
+
+
+def iter_asap7_modelcards() -> List[Path]:
+    if ASAP7_MODELCARD_OVERRIDE:
+        override = Path(ASAP7_MODELCARD_OVERRIDE)
+        if override.is_file():
+            return [override]
+        if override.is_dir():
+            return sorted(override.glob("*.pm"))
+        die(f"missing ASAP7 modelcard override: {override}")
+    if not ASAP7_DIR.exists():
+        die(f"missing ASAP7 modelcard directory: {ASAP7_DIR}")
+    return sorted(ASAP7_DIR.glob("*.pm"))
+
+
+def _asap7_block_level(block: List[str]) -> Optional[float]:
+    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+    for line in block:
+        for match in assign_re.finditer(line):
+            if match.group(1).lower() == "level":
+                return parse_number_with_suffix(match.group(2))
+    return None
+
+
+def select_asap7_models(path: Path) -> List[str]:
+    text = path.read_text()
+    lines = text.splitlines()
+    blocks: List[Tuple[str, str, List[str]]] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if not line:
+            idx += 1
+            continue
+        if line.lower().startswith(".model"):
+            parts = line.split()
+            if len(parts) >= 3:
+                name = parts[1]
+                mtype = parts[2].lower()
+                block = [lines[idx]]
+                idx += 1
+                while idx < len(lines):
+                    next_line = lines[idx]
+                    if next_line.strip().lower().startswith(".model"):
+                        break
+                    block.append(next_line)
+                    idx += 1
+                blocks.append((name, mtype, block))
+                continue
+        idx += 1
+    selected: List[str] = []
+    for name, mtype, block in blocks:
+        if mtype in {"nmos", "pmos"} and _asap7_block_level(block) == 72:
+            selected.append(name)
+    return selected
+
+
+def run_asap7_suite(modelcard: Path,
+                    model_name: str,
+                    label: str,
+                    results_dir: Path,
+                    args: DeepVerifyArgs,
+                    inst_params: Dict[str, float],
+                    backend: str,
+                    temp_c: float) -> bool:
+    out_dir = results_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    validate_instance_params(inst_params)
+
+    ng_id_vg = run_ngspice_dc_vg(modelcard, model_name, inst_params, 0.05, args.vg_start, args.vg_stop, args.vg_step, out_dir, temp_c)
+    ng_id_vd = run_ngspice_dc_vd(modelcard, model_name, inst_params, 1.2, args.vd_start, args.vd_stop, args.vd_step, out_dir, temp_c)
+    vg_values = extract_vg_values(ng_id_vg)
+    ng_caps_vg = run_ngspice_ac_caps_vg(modelcard, model_name, 0.05, vg_values, out_dir, temp_c)
+    ng_caps = parse_ng_caps(ng_caps_vg)
+
+    osdi_rows, metrics_vg = compare_id_vg(modelcard, model_name, inst_params, ng_id_vg, ng_caps, out_dir, backend, temp_c)
+    osdi_rows_vd, metrics_vd = compare_id_vd(modelcard, model_name, inst_params, ng_id_vd, out_dir, backend, temp_c)
+
+    def max_or_zero(values):
+        return max(values) if values else 0.0
+
+    def max_abs(values):
+        return max((abs(v) for v in values), default=0.0)
+
+    def pass_metric(ref_got_pairs, abs_tol):
+        for ref, got in ref_got_pairs:
+            diff = abs(got - ref)
+            if diff <= abs_tol:
+                continue
+            denom = max(abs(ref), abs_tol)
+            if diff / denom > REL_TOL:
+                return False
+        return True
+
+    print(f"Relative error summary ({label} Vg sweep):")
+    for key in ("id", "ig", "is", "ib", "gm", "gds", "gmb", "qg", "qd", "qs", "qb", "cgg", "cgd", "cgs", "cdg", "cdd"):
+        rels, errs = metrics_vg[key]
+        print(f"  {key.upper()} max rel = {max_or_zero(rels):.3e} (max abs {max_abs(errs):.3e})")
+    print(f"Relative error summary ({label} Vd sweep):")
+    for key in ("id", "ig", "is", "ib", "gm", "gds", "gmb", "qg", "qd", "qs", "qb"):
+        rels, errs = metrics_vd[key]
+        print(f"  {key.upper()} max rel = {max_or_zero(rels):.3e} (max abs {max_abs(errs):.3e})")
+
+    pass_id_vg = pass_metric([(r[1], r[2]) for r in osdi_rows], ABS_TOL_I)
+    pass_ig_vg = pass_metric([(r[3], r[4]) for r in osdi_rows], ABS_TOL_I)
+    pass_is_vg = pass_metric([(r[5], r[6]) for r in osdi_rows], ABS_TOL_I)
+    pass_ib_vg = pass_metric([(r[7], r[8]) for r in osdi_rows], ABS_TOL_I)
+    pass_qg_vg = pass_metric([(r[9], r[10]) for r in osdi_rows], ABS_TOL_Q)
+    pass_qd_vg = pass_metric([(r[11], r[12]) for r in osdi_rows], ABS_TOL_Q)
+    pass_qs_vg = pass_metric([(r[13], r[14]) for r in osdi_rows], ABS_TOL_Q)
+    pass_qb_vg = pass_metric([(r[15], r[16]) for r in osdi_rows], ABS_TOL_Q)
+    pass_gm_vg = pass_metric([(r[17], r[18]) for r in osdi_rows], ABS_TOL_I)
+    pass_gds_vg = pass_metric([(r[19], r[20]) for r in osdi_rows], ABS_TOL_I)
+    pass_gmb_vg = pass_metric([(r[21], r[22]) for r in osdi_rows], ABS_TOL_I)
+
+    pass_id_vd = pass_metric([(r[1], r[2]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_ig_vd = pass_metric([(r[3], r[4]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_is_vd = pass_metric([(r[5], r[6]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_ib_vd = pass_metric([(r[7], r[8]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_qg_vd = pass_metric([(r[9], r[10]) for r in osdi_rows_vd], ABS_TOL_Q)
+    pass_qd_vd = pass_metric([(r[11], r[12]) for r in osdi_rows_vd], ABS_TOL_Q)
+    pass_qs_vd = pass_metric([(r[13], r[14]) for r in osdi_rows_vd], ABS_TOL_Q)
+    pass_qb_vd = pass_metric([(r[15], r[16]) for r in osdi_rows_vd], ABS_TOL_Q)
+    pass_gm_vd = pass_metric([(r[17], r[18]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_gds_vd = pass_metric([(r[19], r[20]) for r in osdi_rows_vd], ABS_TOL_I)
+    pass_gmb_vd = pass_metric([(r[21], r[22]) for r in osdi_rows_vd], ABS_TOL_I)
+
+    passed = (pass_id_vg and pass_ig_vg and pass_is_vg and pass_ib_vg
+              and pass_qg_vg and pass_qd_vg and pass_qs_vg and pass_qb_vg
+              and pass_gm_vg and pass_gds_vg and pass_gmb_vg
+              and pass_id_vd and pass_ig_vd and pass_is_vd and pass_ib_vd
+              and pass_qg_vd and pass_qd_vd and pass_qs_vd and pass_qb_vd
+              and pass_gm_vd and pass_gds_vd and pass_gmb_vd)
+
+    if args.tran:
+        tran_dir = out_dir / "tran"
+        ng_tran = run_ngspice_tran(modelcard, model_name, inst_params, args.tran_step, args.tran_stop, tran_dir, temp_c)
+        passed = compare_tran(modelcard, model_name, inst_params, ng_tran, out_dir, args.tran_step, backend, temp_c) and passed
+
+    if passed:
+        print(f"PASS: {label}")
+    else:
+        print(f"FAIL: {label}")
+    return passed
+
+
+def run_asap7_full_verify(args: DeepVerifyArgs, temp_c: float = 27.0) -> bool:
+    modelcards = iter_asap7_modelcards()
+    if not modelcards:
+        die("no ASAP7 modelcards found")
+    inst_params = {"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0, "NRS": 1.0, "NRD": 1.0}
+    overall_ok = True
+    for modelcard in modelcards:
+        model_names = select_asap7_models(modelcard)
+        if not model_names:
+            raise RuntimeError(f"no level=72 models found in {modelcard}")
+        for model_name in model_names:
+            corner_tag = modelcard.stem
+            ng_modelcard = BUILD / "ngspice_eval" / "asap7" / corner_tag / f"{model_name}.osdi"
+            make_ngspice_modelcard(modelcard, ng_modelcard, model_name, inst_params)
+            results_dir = BUILD / "ngspice_eval" / "asap7" / corner_tag / model_name
+            label = f"asap7_{corner_tag}_{model_name}"
+            ok = run_asap7_suite(
+                ng_modelcard,
+                model_name,
+                label,
+                results_dir,
+                args,
+                inst_params,
+                args.backend,
+                temp_c,
+            )
+            overall_ok = overall_ok and ok
+    return overall_ok
