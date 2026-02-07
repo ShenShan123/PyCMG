@@ -14,7 +14,7 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * `pycmg/`: Python package (PyBind11 extension + helpers).
 * `cpp/`: C++ OSDI host and bindings.
 * `bsim-cmg-va/benchmark_test/`: SPICE netlists and model cards for verification.
-* `build/`: Compilation artifacts (.osdi, binaries).
+* `build/`: Generated compilation artifacts (.osdi, binaries) when present.
 * `build-deep-verify/`: Dedicated build outputs for verification tooling.
 * `circuit_examples/`: Test circuits and verification outputs.
 
@@ -98,5 +98,5 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 - C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
 - PyBind11 layer: `_pycmg` module exposes `Model`, `Instance`, and `eval_dc`.
 - Transient evaluation: `_pycmg` exposes `eval_tran`; playback verification runs via `tests/verify_utils.py` and is exercised by ASAP7 verification tests.
-- ASAP7 verification: `tests/test_asap7_full_verify.py` runs DC/AC/TRAN across all ASAP7 modelcards; `tests/test_asap7_pvt_verify.py` expands across temp and VDD PVT combinations.
+- ASAP7 verification: `tests/test_asap7_full_verify.py` runs DC/AC/TRAN across ASAP7 modelcards; temperature/voltage sweeps live in `tests/test_comprehensive.py`.
 - ASAP7 modelcard override: set `ASAP7_MODELCARD` to a file or directory to redirect the ASAP7 verification inputs.
