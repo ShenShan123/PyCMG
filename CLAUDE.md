@@ -60,6 +60,7 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * Comprehensive verification and ASAP7 reproduction now live under `tests/`:
     * `pytest tests/test_comprehensive.py -v`
     * `pytest tests/test_reproduce_asap7.py -v`
+* `main.py` is the entrypoint for running pytest suites and data collection workflows.
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).
