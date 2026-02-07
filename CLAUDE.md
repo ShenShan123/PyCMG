@@ -56,7 +56,10 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
     4.  Assert accuracy within accepted tolerance (e.g., `1e-9`).
 * **Temperature sweeps:** Always apply `.temp` in NGSPICE and pass `temperature` (K) to `pycmg.Instance`.
 * **Stress tests:** Random OP points must compare **pycmg vs NGSPICE** (not osdi_eval). Use NGSPICE `.op` per point and compare I/Q/gm/gds/gmb within tolerances.
-* **Robustness tests:** Use `scripts/test_robustness.py` (`--all`) for pulse stability, param sensitivity with RSS check, and thread safety.
+* **Robustness tests:** Use `tests/verify_utils.py` helpers via `pytest tests/test_robustness_helpers.py -v` for pulse stability utilities, param sensitivity, and thread safety checks.
+* Comprehensive verification and ASAP7 reproduction now live under `tests/`:
+    * `pytest tests/test_comprehensive.py -v`
+    * `pytest tests/test_reproduce_asap7.py -v`
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).
@@ -93,4 +96,6 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
 - C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
 - PyBind11 layer: `_pycmg` module exposes `Model`, `Instance`, and `eval_dc`.
-- Transient evaluation: `_pycmg` exposes `eval_tran`; playback verification added in `scripts/deep_verify.py` but transient matching is still failing and needs follow-up.
+- Transient evaluation: `_pycmg` exposes `eval_tran`; playback verification runs via `tests/verify_utils.py` and is exercised by ASAP7 verification tests.
+- ASAP7 verification: `tests/test_asap7_full_verify.py` runs DC/AC/TRAN across all ASAP7 modelcards; `tests/test_asap7_pvt_verify.py` expands across temp and VDD PVT combinations.
+- ASAP7 modelcard override: set `ASAP7_MODELCARD` to a file or directory to redirect the ASAP7 verification inputs.
