@@ -1,146 +1,93 @@
 #!/usr/bin/env python3
+"""
+PyCMG Main Entry Point
+
+Simplified CLI for running PyCMG verification tests and data collection.
+
+Usage:
+    python main.py test api           # Quick smoke tests
+    python main.py test integration   # NGSPICE comparison tests
+    python main.py test asap7         # ASAP7 PVT verification
+    python main.py test all           # Run all tests
+"""
+
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
-
-from tests import verify_utils
+from typing import List
 
 ROOT = Path(__file__).resolve().parent
 
 
 def _run_pytest(args: List[str]) -> int:
+    """Run pytest with given arguments."""
     cmd = [sys.executable, "-m", "pytest"] + args
     return subprocess.call(cmd)
 
 
 def _test_suite(suite: str, pytest_args: List[str]) -> int:
-    if suite == "comprehensive":
-        args = ["tests/test_comprehensive.py", "-v"]
-    elif suite == "repro":
-        args = ["tests/test_reproduce_asap7.py", "-v"]
-    elif suite == "asap7-full":
-        args = ["tests/test_asap7_full_verify.py", "-v"]
-    elif suite == "asap7-pvt":
-        args = ["tests/test_asap7_pvt_verify.py", "-v"]
-    elif suite == "all":
-        args = ["tests/", "-v"]
-    else:
-        raise ValueError(f"unknown test suite: {suite}")
+    """Run a specific test suite."""
+    test_map = {
+        "api": ["tests/test_api.py", "-v"],
+        "integration": ["tests/test_integration.py", "-v"],
+        "asap7": ["tests/test_asap7.py", "-v"],
+        "all": ["tests/", "-v"],
+    }
+
+    if suite not in test_map:
+        print(f"Error: Unknown test suite '{suite}'")
+        print(f"Available suites: {', '.join(test_map.keys())}")
+        return 1
+
+    args = test_map[suite]
     return _run_pytest(args + pytest_args)
 
 
-def _collect_deep_verify(args: argparse.Namespace) -> int:
-    deep_args = verify_utils.DeepVerifyArgs(
-        out=str(args.out),
-        vg_start=args.vg_start,
-        vg_stop=args.vg_stop,
-        vg_step=args.vg_step,
-        vd_start=args.vd_start,
-        vd_stop=args.vd_stop,
-        vd_step=args.vd_step,
-        backend=args.backend,
-        temps=args.temps,
-        stress=args.stress,
-        stress_only=args.stress_only,
-        stress_samples=args.stress_samples,
-        stress_seed=args.stress_seed,
-        tran=args.tran,
-        tran_step=args.tran_step,
-        tran_stop=args.tran_stop,
-    )
-    ok = verify_utils.run_deep_verify(deep_args)
-    return 0 if ok else 1
-
-
-def _collect_asap7(args: argparse.Namespace) -> int:
-    if args.modelcard:
-        os.environ["ASAP7_MODELCARD"] = str(args.modelcard)
-
-    deep_args = verify_utils.DeepVerifyArgs(
-        out=str(args.out),
-        vg_start=args.vg_start,
-        vg_stop=args.vg_stop,
-        vg_step=args.vg_step,
-        vd_start=args.vd_start,
-        vd_stop=args.vd_stop,
-        vd_step=args.vd_step,
-        backend=args.backend,
-        temps=str(args.temp_c),
-        tran=args.tran,
-    )
-    ok = verify_utils.run_asap7_full_verify(deep_args, temp_c=args.temp_c)
-    return 0 if ok else 1
-
-
-def _add_deep_verify_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--out", type=Path, default=verify_utils.CIRCUIT_DIR)
-    parser.add_argument("--vg-start", type=float, default=0.0)
-    parser.add_argument("--vg-stop", type=float, default=1.2)
-    parser.add_argument("--vg-step", type=float, default=0.1)
-    parser.add_argument("--vd-start", type=float, default=0.0)
-    parser.add_argument("--vd-stop", type=float, default=1.2)
-    parser.add_argument("--vd-step", type=float, default=0.1)
-    parser.add_argument("--temps", type=str, default="27")
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default=verify_utils.BACKEND_PYCMG,
-        choices=[verify_utils.BACKEND_PYCMG, verify_utils.BACKEND_OSDI],
-    )
-    parser.add_argument("--stress", action="store_true")
-    parser.add_argument("--stress-only", action="store_true")
-    parser.add_argument("--stress-samples", type=int, default=20)
-    parser.add_argument("--stress-seed", type=int)
-    parser.add_argument("--tran", action="store_true")
-    parser.add_argument("--tran-step", type=float, default=1e-11)
-    parser.add_argument("--tran-stop", type=float, default=1e-8)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="PyCMG entrypoint for verification tests and data collection."
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    test_parser = subparsers.add_parser("test", help="Run pytest suites.")
-    test_parser.add_argument(
-        "suite",
-        choices=["comprehensive", "repro", "asap7-full", "asap7-pvt", "all"],
-    )
-    test_parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
-
-    collect_parser = subparsers.add_parser("collect", help="Run data collection helpers.")
-    collect_sub = collect_parser.add_subparsers(dest="mode", required=True)
-
-    deep_parser = collect_sub.add_parser("deep-verify", help="Run deep-verify sweeps.")
-    _add_deep_verify_args(deep_parser)
-
-    asap7_parser = collect_sub.add_parser("asap7", help="Run ASAP7 verification sweeps.")
-    _add_deep_verify_args(asap7_parser)
-    asap7_parser.add_argument("--modelcard", type=Path)
-    asap7_parser.add_argument("--temp-c", type=float, default=27.0)
-
-    return parser
+def _print_usage() -> None:
+    """Print usage information."""
+    print(__doc__)
+    print("\nAvailable test suites:")
+    print("  api           Quick API validation (~5s, no NGSPICE required)")
+    print("  integration   NGSPICE comparison tests (~30s)")
+    print("  asap7         ASAP7 PVT verification (~5min)")
+    print("  all           Run all tests (~5.5min)")
+    print()
+    print("Examples:")
+    print("  python main.py test api")
+    print("  python main.py test integration")
+    print("  python main.py test asap7 -v")
+    print("  python main.py test all --tb=short")
 
 
 def main() -> int:
-    parser = _build_parser()
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="PyCMG entrypoint for verification tests.",
+        usage="python main.py test SUITE [pytest_options]",
+    )
+    parser.add_argument(
+        "suite",
+        nargs="?",
+        choices=["api", "integration", "asap7", "all"],
+        help="Test suite to run",
+    )
+    parser.add_argument(
+        "pytest_args",
+        nargs=argparse.REMAINDER,
+        help="Additional arguments to pass to pytest",
+    )
+
     args = parser.parse_args()
 
-    if args.command == "test":
-        return _test_suite(args.suite, list(args.pytest_args))
-    if args.command == "collect" and args.mode == "deep-verify":
-        return _collect_deep_verify(args)
-    if args.command == "collect" and args.mode == "asap7":
-        return _collect_asap7(args)
+    if not args.suite:
+        _print_usage()
+        return 0
 
-    raise ValueError(f"Unhandled command: {args.command}")
+    return _test_suite(args.suite, list(args.pytest_args))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

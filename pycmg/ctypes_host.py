@@ -1196,6 +1196,8 @@ class Instance:
             "is": self._read_current("s"),
             "ie": self._read_current("e"),
         }
+        # Drain-source current (Ids = Id - Is for common-source configuration)
+        out["ids"] = out["id"] - out["is"]
 
         qg = self._read_opvar("qg", "qgate") or 0.0
         qd = self._read_opvar("qd", "qdrain") or 0.0
@@ -1298,6 +1300,9 @@ class Instance:
             out["ig"] = self._read_current_from(total_residual, "g")
             out["is"] = self._read_current_from(total_residual, "s")
             out["ie"] = self._read_current_from(total_residual, "e")
+
+        # Drain-source current (Ids = Id - Is for common-source configuration)
+        out["ids"] = out["id"] - out["is"]
 
         self._sim.copy_solve_to_prev()
         self._has_prev_solve = True

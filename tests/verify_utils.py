@@ -39,8 +39,14 @@ def ensure_modelcard(src: Path, dst: Path, overrides=None) -> None:
     if not src.exists():
         die(f"missing modelcard source: {src}")
     text = src.read_text()
-    # Clamp EOTACC for OSDI compatibility.
-    text = re.sub(r"EOTACC\s*=\s*([0-9eE+\-\.]+)", "EOTACC = 1.10e-10", text)
+    # Clamp EOTACC to be >= 1.1e-10 (above the 0.1n minimum) for OSDI compatibility
+    def fix_eotacc(m):
+        val = float(m.group(1))
+        # EOTACC must be > 1e-10 (0.1n), clamp to 1.1e-10 if below threshold
+        if val <= 1.0e-10:
+            return "EOTACC = 1.1e-10"
+        return m.group(0)
+    text = re.sub(r"EOTACC\s*=\s*([0-9eE+\-\.]+)", fix_eotacc, text, flags=re.IGNORECASE)
     if overrides:
         for key, val in overrides.items():
             key_u = key.upper()
@@ -1583,7 +1589,14 @@ def run_thread_test(temp_c: float, thread_count: int, iterations: int) -> Tuple[
 
 def make_ngspice_modelcard(src: Path, dst: Path, model_name: str, overrides: Dict[str, float]) -> None:
     text = src.read_text()
-    text = re.sub(r"EOTACC\s*=\s*([0-9eE+\-\.]+)", "EOTACC = 1.10e-10", text, flags=re.IGNORECASE)
+    # Clamp EOTACC to be >= 1.1e-10 (above the 0.1n minimum) for OSDI compatibility
+    def fix_eotacc(m):
+        val = float(m.group(1))
+        # EOTACC must be > 1e-10 (0.1n), clamp to 1.1e-10 if below threshold
+        if val <= 1.0e-10:
+            return "EOTACC = 1.1e-10"
+        return m.group(0)
+    text = re.sub(r"EOTACC\s*=\s*([0-9eE+\-\.]+)", fix_eotacc, text, flags=re.IGNORECASE)
     lines: List[str] = []
     in_target = False
     found_keys: set[str] = set()
