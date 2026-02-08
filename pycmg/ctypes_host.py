@@ -354,49 +354,81 @@ def _to_lower(s: str) -> str:
     return s.lower()
 
 
-def parse_modelcard(path: str) -> ParsedModel:
-    params: Dict[str, float] = {}
-    model_name = ""
-    in_model = False
+def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> ParsedModel:
     assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+    target_lower = _to_lower(target_model_name) if target_model_name else None
+
+    def _parse_params(lines: List[str]) -> Dict[str, float]:
+        parsed_params: Dict[str, float] = {}
+        for line in lines:
+            for match in assign_re.finditer(line):
+                key = match.group(1)
+                val = match.group(2)
+                parsed = parse_number_with_suffix(val)
+                if _to_lower(key) == "eotacc" and parsed < 1.1e-10:
+                    parsed = 1.10e-10
+                parsed_params[key] = parsed
+        return parsed_params
+
+    def _is_valid_model(model_type: str, params: Dict[str, float]) -> bool:
+        mtype = _to_lower(model_type)
+        if mtype == "bsimcmg":
+            return True
+        if mtype in {"nmos", "pmos"}:
+            level = None
+            for key, val in params.items():
+                if _to_lower(key) == "level":
+                    level = val
+                    break
+            return level == 72
+        return False
+
     with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            trimmed = line
-            pos_comment = trimmed.find("*")
-            if pos_comment != -1:
-                trimmed = trimmed[:pos_comment]
-            trimmed = trimmed.strip()
-            if not trimmed:
-                continue
-            if not in_model and trimmed.lower().startswith(".model"):
-                parts = trimmed.split()
-                if len(parts) >= 3:
-                    mname = parts[1]
-                    mtype = parts[2].lower()
-                    if mtype == "bsimcmg":
-                        model_name = mname
-                        in_model = True
-                for match in assign_re.finditer(trimmed):
-                    key = match.group(1)
-                    val = match.group(2)
-                    parsed = parse_number_with_suffix(val)
-                    if _to_lower(key) == "eotacc" and parsed < 1.1e-10:
-                        parsed = 1.10e-10
-                    params[key] = parsed
-                continue
-            if in_model and trimmed.startswith("+"):
-                payload = trimmed[1:]
-                for match in assign_re.finditer(payload):
-                    key = match.group(1)
-                    val = match.group(2)
-                    parsed = parse_number_with_suffix(val)
-                    if _to_lower(key) == "eotacc" and parsed < 1.1e-10:
-                        parsed = 1.10e-10
-                    params[key] = parsed
-                continue
-    if not model_name:
-        raise RuntimeError(f"no bsimcmg model found in modelcard: {path}")
-    return ParsedModel(name=model_name, params=params)
+        lines = fh.readlines()
+
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        trimmed = raw
+        pos_comment = trimmed.find("*")
+        if pos_comment != -1:
+            trimmed = trimmed[:pos_comment]
+        trimmed = trimmed.strip()
+        if not trimmed:
+            idx += 1
+            continue
+        if trimmed.lower().startswith(".model"):
+            block_lines = [trimmed]
+            idx += 1
+            while idx < len(lines):
+                cont_raw = lines[idx]
+                cont = cont_raw
+                pos_comment = cont.find("*")
+                if pos_comment != -1:
+                    cont = cont[:pos_comment]
+                cont = cont.strip()
+                if not cont:
+                    idx += 1
+                    continue
+                if cont.startswith("+"):
+                    block_lines.append(cont[1:].strip())
+                    idx += 1
+                    continue
+                break
+
+            parts = block_lines[0].split()
+            if len(parts) >= 3:
+                model_name = parts[1]
+                model_type = parts[2]
+                if target_lower is None or _to_lower(model_name) == target_lower:
+                    params = _parse_params(block_lines)
+                    if _is_valid_model(model_type, params):
+                        return ParsedModel(name=model_name, params=params)
+            continue
+        idx += 1
+
+    expected = target_model_name if target_model_name else "bsimcmg or level=72 nmos/pmos"
+    raise RuntimeError(f"no {expected} model found in modelcard: {path}")
 
 
 def _check_init_result(desc: Optional[OsdiDescriptor], info: OsdiInitInfo) -> None:
@@ -936,7 +968,8 @@ def apply_param(desc: OsdiDescriptor,
 
 
 class Model:
-    def __init__(self, osdi_path: str, modelcard_path: str, model_name: str) -> None:
+    def __init__(self, osdi_path: str, modelcard_path: str, model_name: str,
+                 model_card_name: Optional[str] = None) -> None:
         self._lib = OsdiLibrary(osdi_path)
         desc = self._lib.descriptor_by_name(model_name) if model_name else None
         if desc is None:
@@ -947,7 +980,7 @@ class Model:
         self._model = OsdiModel(desc)
         self._modelcard_params: Dict[str, float] = {}
         if modelcard_path:
-            parsed = parse_modelcard(modelcard_path)
+            parsed = parse_modelcard(modelcard_path, model_card_name)
             self._modelcard_params = dict(parsed.params)
 
     @property

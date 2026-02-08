@@ -1,30 +1,14 @@
-from pathlib import Path
-import subprocess
-import sys
+from tests import verify_utils
 
 
 def test_deep_verify_backend_flag() -> None:
-    script = Path(__file__).resolve().parents[1] / "scripts" / "deep_verify.py"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--backend",
-            "pycmg",
-            "--vg-start",
-            "0",
-            "--vg-stop",
-            "0",
-            "--vg-step",
-            "1",
-            "--vd-start",
-            "0",
-            "--vd-stop",
-            "0",
-            "--vd-step",
-            "1",
-        ],
-        capture_output=True,
-        text=True,
+    args = verify_utils.DeepVerifyArgs(
+        backend="pycmg",
+        vg_start=0.0,
+        vg_stop=0.0,
+        vg_step=1.0,
+        vd_start=0.0,
+        vd_stop=0.0,
+        vd_step=1.0,
     )
-    assert result.returncode == 0, result.stderr
+    assert verify_utils.run_deep_verify(args)
