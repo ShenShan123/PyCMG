@@ -8,6 +8,9 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * **NGSPICE Simulator:** `/usr/local/ngspice-45.2/bin/ngspice`
 * **Build System:** CMake / Make
 * **Python Bindings:** PyBind11
+* **Environment Overrides:**
+    * `NGSPICE_BIN` to point at a custom NGSPICE binary.
+    * `ASAP7_MODELCARD` to point ASAP7 verification at a file or directory.
 
 ## Directory Structure
 * `bsim-cmg-va/`: Verilog-A source files (.va) and include files (.include).
@@ -17,6 +20,7 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * `build/`: Generated compilation artifacts (.osdi, binaries) when present.
 * `build-deep-verify/`: Dedicated build outputs for verification tooling.
 * `circuit_examples/`: Test circuits and verification outputs.
+* `tests/`: pytest-based verification suites and helpers (`tests/verify_utils.py`).
 
 ## Implementation Workflow
 
@@ -57,10 +61,14 @@ Develop a standalone Python interface for the BSIM-CMG Verilog-A model using Ope
 * **Temperature sweeps:** Always apply `.temp` in NGSPICE and pass `temperature` (K) to `pycmg.Instance`.
 * **Stress tests:** Random OP points must compare **pycmg vs NGSPICE** (not osdi_eval). Use NGSPICE `.op` per point and compare I/Q/gm/gds/gmb within tolerances.
 * **Robustness tests:** Use `tests/verify_utils.py` helpers via `pytest tests/test_robustness_helpers.py -v` for pulse stability utilities, param sensitivity, and thread safety checks.
-* Comprehensive verification and ASAP7 reproduction now live under `tests/`:
+* **Number parsing:** Use `pycmg.ctypes_host.parse_number_with_suffix` (mirrored in `tests/verify_utils.py`) for suffix parsing to stay consistent with runtime.
+* **Test entrypoints:** `main.py` runs suites and data-collection workflows; `pytest tests` runs the full suite (long-running).
+* **Build automation:** `tests/verify_utils.py` will configure/build `build-deep-verify/` via CMake if required artifacts are missing or stale.
+* Comprehensive verification and ASAP7 reproduction live under `tests/`:
     * `pytest tests/test_comprehensive.py -v`
     * `pytest tests/test_reproduce_asap7.py -v`
-* `main.py` is the entrypoint for running pytest suites and data collection workflows.
+    * `pytest tests/test_asap7_full_verify.py -v`
+    * `pytest tests/test_asap7_pvt_verify.py -v`
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).

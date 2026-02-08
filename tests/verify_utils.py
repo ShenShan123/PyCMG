@@ -59,43 +59,10 @@ def ensure_modelcard(src: Path, dst: Path, overrides=None) -> None:
     dst.write_text(text)
 
 
-def parse_number_with_suffix(token: str) -> float:
-    s = token.strip().lower()
-    scale = 1.0
-    if s.endswith("meg"):
-        scale = 1e6
-        s = s[:-3]
-    elif s.endswith("t"):
-        scale = 1e12
-        s = s[:-1]
-    elif s.endswith("g"):
-        scale = 1e9
-        s = s[:-1]
-    elif s.endswith("k"):
-        scale = 1e3
-        s = s[:-1]
-    elif s.endswith("m"):
-        scale = 1e-3
-        s = s[:-1]
-    elif s.endswith("u"):
-        scale = 1e-6
-        s = s[:-1]
-    elif s.endswith("n"):
-        scale = 1e-9
-        s = s[:-1]
-    elif s.endswith("p"):
-        scale = 1e-12
-        s = s[:-1]
-    elif s.endswith("f"):
-        scale = 1e-15
-        s = s[:-1]
-    elif s.endswith("a"):
-        scale = 1e-18
-        s = s[:-1]
-    return float(s) * scale
-
-
 def parse_modelcard_params(path: Path, model_name: str):
+    from pycmg import ctypes_host
+
+    parse_number_with_suffix = ctypes_host.parse_number_with_suffix
     text = path.read_text()
     lines = []
     in_model = False
@@ -124,6 +91,9 @@ def parse_modelcard_params(path: Path, model_name: str):
 
 
 def parse_instance_params(netlist: Path, instance_name: str = "X1"):
+    from pycmg import ctypes_host
+
+    parse_number_with_suffix = ctypes_host.parse_number_with_suffix
     if not netlist.exists():
         die(f"missing netlist: {netlist}")
     for raw in netlist.read_text().splitlines():
@@ -569,7 +539,6 @@ def run_ngspice_tran(modelcard: Path,
         out_dir / "ng_tran.log",
         "time v(g) v(d) v(s) v(e) "
         "i(vg) i(vd) i(vs) i(ve) "
-        "@n1[id] @n1[ig] @n1[is] @n1[ib] "
         "@n1[qg] @n1[qd] @n1[qs] @n1[qb]",
     )
     return out_csv
@@ -692,10 +661,10 @@ def compare_tran(modelcard: Path,
     vd_idx = col_index(headers, "v(d)")
     vs_idx = col_index(headers, "v(s)")
     ve_idx = col_index(headers, "v(e)")
-    id_idx = find_col(headers, ["@n1[id]", "@N1[id]", "i(vd)"])
-    ig_idx = find_col(headers, ["@n1[ig]", "@N1[ig]", "i(vg)"])
-    is_idx = find_col(headers, ["@n1[is]", "@N1[is]", "i(vs)"])
-    ib_idx = find_col(headers, ["@n1[ib]", "@N1[ib]", "i(ve)"])
+    id_idx = find_col(headers, ["i(vd)", "@n1[id]", "@N1[id]"])
+    ig_idx = find_col(headers, ["i(vg)", "@n1[ig]", "@N1[ig]"])
+    is_idx = find_col(headers, ["i(vs)", "@n1[is]", "@N1[is]"])
+    ib_idx = find_col(headers, ["i(ve)", "@n1[ib]", "@N1[ib]"])
     qg_idx = col_index(headers, "@n1[qg]")
     required = [time_idx, vg_idx, vd_idx, vs_idx, ve_idx, id_idx, ig_idx, is_idx, ib_idx]
     if any(idx is None for idx in required):
@@ -745,13 +714,13 @@ def compare_tran(modelcard: Path,
             "e": row[ve_idx],  # type: ignore[index]
         }
         osdi = eval_tran(nodes, t, dt)
-        ng_id = -row[id_idx]  # type: ignore[index]
-        ng_is = -row[is_idx]  # type: ignore[index]
-        ng_ib = -row[ib_idx]  # type: ignore[index]
-        osdi_id = osdi["id"]
+        ng_id = row[id_idx]  # type: ignore[index]
+        ng_is = row[is_idx]  # type: ignore[index]
+        ng_ib = row[ib_idx]  # type: ignore[index]
+        osdi_id = -osdi["id"]
         osdi_ig = osdi["ig"]
-        osdi_is = osdi["is"]
-        osdi_ib = osdi["ie"]
+        osdi_is = -osdi["is"]
+        osdi_ib = -osdi["ie"]
         if qg_idx is not None:
             ng_qg = row[qg_idx]  # type: ignore[index]
             osdi_qg = osdi.get("qg", 0.0)
@@ -1639,6 +1608,9 @@ def iter_asap7_modelcards() -> List[Path]:
 
 
 def _asap7_block_level(block: List[str]) -> Optional[float]:
+    from pycmg import ctypes_host
+
+    parse_number_with_suffix = ctypes_host.parse_number_with_suffix
     assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
     for line in block:
         for match in assign_re.finditer(line):

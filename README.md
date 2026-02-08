@@ -8,7 +8,14 @@ PyCMG provides a Python interface to the BSIM-CMG Verilog-A model using OpenVAF/
 - CMake + Make
 - Python 3.10+ (PyBind11 for the extension)
 
-## Entry Point
+## Environment overrides
+- `NGSPICE_BIN`: override the NGSPICE binary path (used by `tests/verify_utils.py`).
+- `ASAP7_MODELCARD`: point ASAP7 verification at a single modelcard file or a directory of `.pm` files.
+
+## Build artifacts
+Verification builds into `build-deep-verify/` (OSDI library, `osdi_eval`, and `_pycmg`). The build is created on demand by `tests/verify_utils.py`.
+
+## Entry point: `main.py`
 `main.py` is the primary entry for verification tests and data collection.
 
 ### Run tests
@@ -30,3 +37,5 @@ python main.py collect asap7 --temp-c 27.0
 ```bash
 pytest tests/ -v
 ```
+
+Note: `pytest tests` is long-running because ASAP7 and NGSPICE sweeps execute many cases. Expect on the order of tens of minutes.
