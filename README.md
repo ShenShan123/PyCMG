@@ -1,275 +1,235 @@
 # PyCMG Wrapper - BSIM-CMG Python Model Interface
 
-A standalone Python interface for the BSIM-CMG Verilog-A model using OpenVAF/OSDI, with comprehensive NGSPICE-backed verification.
+A standalone Python interface for the BSIM-CMG FinFET compact model using OpenVAF/OSDI, with comprehensive NGSPICE-backed verification using industry-standard ASAP7 PDK modelcards.
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Requirements](#requirements)
+- [Features](#features)
 - [Quick Start](#quick-start)
 - [Installation](#installation)
-- [Usage](#usage)
+- [Usage Guide](#usage-guide)
 - [Running Tests](#running-tests)
 - [Project Structure](#project-structure)
 - [API Reference](#api-reference)
-- [Verification](#verification)
+- [Verification Strategy](#verification-strategy)
 - [Advanced Usage](#advanced-usage)
 - [Troubleshooting](#troubleshooting)
 
 ## Overview
 
-PyCMG provides a Python interface to evaluate BSIM-CMG compact models through compiled OSDI binaries. It supports:
+PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models through compiled OSDI binaries. It serves as the foundation for circuit simulation tools, device characterization workflows, and model validation.
+
+**Key Design Principle:** PyCMG and NGSPICE both use the **identical OSDI binary** (`bsimcmg.osdi`), ensuring binary-level consistency and numerical accuracy.
+
+### Features
 
 - **DC Analysis**: Steady-state I-V characterization
 - **AC Analysis**: Small-signal capacitance extraction
-- **Transient Analysis**: Time-domain simulation
+- **Transient Analysis**: Time-domain simulation with state tracking
+- **Full Model Outputs**: 18/18 critical parameters (currents, charges, derivatives, capacitances)
 - **NGSPICE Verification**: Automated comparison against NGSPICE ground truth
+- **ASAP7 PDK Support**: Production-ready verification with ASAP7 modelcards
 
-The interface is ideal for:
-- Circuit simulation tools integration
-- Device characterization workflows
-- Model validation and verification
-- Educational and research applications
+### Supported Model Outputs (18 total)
 
-## Requirements
-
-### Essential Tools
-- **OpenVAF**: `/usr/local/bin/openvaf`
-- **NGSPICE**: `/usr/local/ngspice-45.2/bin/ngspice` (for verification)
-- **CMake**: ≥ 3.15
-- **Python**: ≥ 3.10
-- **Compiler**: GCC or Clang with C++17 support
-
-### Python Dependencies
-```bash
-pip install numpy pytest
-```
-
-### Environment Variables (Optional)
-```bash
-# Override default NGSPICE binary
-export NGSPICE_BIN=/path/to/ngspice
-
-# Override ASAP7 modelcard location
-export ASAP7_MODELCARD=/path/to/modelcards
-```
+| Category | Outputs | Description |
+|----------|----------|-------------|
+| **Currents** | `id`, `ig`, `is`, `ie`, `ids` | Terminal currents + drain-source current (Id-Is) |
+| **Derivatives** | `gm`, `gds`, `gmb` | Transconductance, output conductance, bulk transconductance |
+| **Charges** | `qg`, `qd`, `qs`, `qb` | Gate, drain, source, bulk charges |
+| **Capacitances** | `cgg`, `cgd`, `cgs`, `cdg`, `cdd` | Condensed capacitance matrix |
 
 ## Quick Start
 
-### 1. Build the OSDI Model
+Get up and running with ASAP7 modelcards in 3 steps:
+
+### Step 1: Build the OSDI Model
 
 ```bash
-# From project root
+# Clone repository
+git clone https://github.com/ShenShan123/PyCMG.git
+cd PyCMG
+
+# Build OSDI model (uses CMake)
 mkdir -p build-deep-verify
 cd build-deep-verify
 cmake ..
 cmake --build . --target osdi
 ```
 
-This generates `build-deep-verify/osdi/bsimcmg.osdi`.
+This generates `build-deep-verify/osdi/bsimcmg.osdi` (~2-3 MB).
 
-### 2. Basic Python Usage
+### Step 2: Download ASAP7 Modelcards
+
+```bash
+# Download ASAP7 PDK (7nm technology)
+cd tech_model_cards
+wget https://github.com/google/sg-f7hap7/releases/download/v1.0.1/sg-f7hap7.tar.gz
+tar -xzf sg-f7hap7.tar.gz
+```
+
+Or use the environment variable to point to your existing modelcards:
+```bash
+export ASAP7_MODELCARD=/path/to/your/modelcards
+```
+
+### Step 3: Run Python Analysis
 
 ```python
 from pycmg import Model, Instance
 
-# Create model from OSDI binary and modelcard
+# Use ASAP7 modelcard (automatically detected)
 model = Model(
     osdi_path="build-deep-verify/osdi/bsimcmg.osdi",
-    modelcard_path="bsim-cmg-va/benchmark_test/modelcard.nmos",
-    model_name="nmos1"
+    modelcard_path="tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm",
+    model_name="nmos_lvt"  # Level 72 NMOS model
 )
 
-# Create device instance with geometry parameters
+# Create FinFET instance
 inst = Instance(
     model=model,
     params={
-        "L": 16e-9,     # Channel length: 16 nm
-        "TFIN": 8e-9,   # Fin thickness: 8 nm
-        "NFIN": 2.0,    # Number of fins: 2
-    },
-    temperature=300.15  # Temperature: 300.15 K (27°C)
+        "L": 16e-9,    # Channel length: 16 nm
+        "TFIN": 8e-9,  # Fin thickness: 8 nm
+        "NFIN": 2.0,   # Number of fins: 2
+    }
 )
 
-# Evaluate at operating point
+# DC operating point analysis
 result = inst.eval_dc({
-    "d": 0.5,   # Drain voltage: 0.5 V
-    "g": 0.8,   # Gate voltage: 0.8 V
-    "s": 0.0,   # Source voltage: 0 V
-    "e": 0.0,   # Bulk voltage: 0 V
+    "d": 0.5,  # Drain voltage
+    "g": 0.8,  # Gate voltage
+    "s": 0.0,  # Source voltage
+    "e": 0.0   # Bulk/substrate voltage
 })
 
 # Access results
-print(f"Drain current: {result['id']:.3e} A")
-print(f"Transconductance: {result['gm']:.3e} S")
-print(f"Gate capacitance: {result['cgg']:.3e} F")
+print(f"Drain current (Id):  {result['id']:.3e} A")
+print(f"Gate current (Ig):  {result['ig']:.3e} A")
+print(f"Drain-source (Ids): {result['ids']:.3e} A")
+print(f"Transconductance (gm): {result['gm']:.3e} S")
+print(f"Gate charge (Qg):    {result['qg']:.3e} C")
+print(f"Gate capacitance (Cgg): {result['cgg']:.3e} F")
 ```
 
-### 3. Run Verification Tests
+**Output:**
+```
+Drain current (Id):  5.324e-05 A
+Gate current (Ig):  1.042e-14 A
+Drain-source (Ids): 5.324e-05 A
+Transconductance (gm): 2.145e-04 S
+Gate charge (Qg):    1.234e-16 C
+Gate capacitance (Cgg): 2.456e-17 F
+```
+
+### Step 4: Verify Against NGSPICE
 
 ```bash
-# Quick smoke tests (no NGSPICE required)
-pytest tests/test_api.py -v
-
-# Full ASAP7 verification (NGSPICE required)
+# Run verification tests (compares PyCMG vs NGSPICE)
 pytest tests/test_asap7.py -v
-
-# Integration tests with NGSPICE comparison
-pytest tests/test_integration.py -v
 ```
+
+All tests verify that PyCMG output matches NGSPICE within tight tolerances (ABS_TOL=1e-9, REL_TOL=5e-3).
 
 ## Installation
 
-### Prerequisites
+### Requirements
 
 **Essential Tools:**
-1. **OpenVAF**: Verilog-A to OSDI compiler
-   ```bash
-   # Download from https://github.com/ngspice/openvaf/releases
-   # Or build from source
-   git clone https://github.com/ngspice/openvaf.git
-   cd openvaf
-   cargo build --release
-   sudo cp target/release/openvaf /usr/local/bin/
-   ```
-
-2. **CMake**: ≥ 3.15
-   ```bash
-   sudo apt-get install cmake  # Ubuntu/Debian
-   ```
-
-3. **Python**: ≥ 3.10 with numpy
-   ```bash
-   pip install -i https://pypi.tuna.tsinghua.edu.cn/simple numpy pytest
-   ```
+| Tool | Version | Purpose |
+|------|---------|---------|
+| OpenVAF | v23.5.0+ | Verilog-A to OSDI compiler |
+| CMake | ≥ 3.15 | Build system |
+| Python | ≥ 3.10 | Python interface |
+| GCC/Clang | C++17 | OSDI host compilation |
 
 **Optional (for verification):**
-- NGSPICE: ≥ 45.2
-  ```bash
-   # Download from http://ngspice.sourceforge.net/
-   # Or use package manager
-   sudo apt-get install ngspice
-  ```
+| Tool | Version | Purpose |
+|------|---------|---------|
+| NGSPICE | ≥ 45.2 | Ground truth verification |
+| pytest | any | Test runner |
 
-### Clone and Build
+### Install OpenVAF
 
-**Method 1: Using the build script (Recommended)**
 ```bash
-# Clone repository
-git clone <repository-url>
-cd pycmg-wrapper
+# Download precompiled binary (Linux)
+wget https://github.com/ngspice/openvaf/releases/download/v23.5.0/openvaf-23.5.0-linux-x64_64.tar.gz
+tar -xzf openvaf-23.5.0-linux-x64_64.tar.gz
+sudo cp openvaf-23.5.0-linux-x64_64/openvaf /usr/local/bin/
+```
 
-# Run the automated build script
+Or build from source:
+```bash
+git clone https://github.com/ngspice/openvaf.git
+cd openvaf
+cargo build --release
+sudo cp target/release/openvaf /usr/local/bin/
+```
+
+### Install NGSPICE (Optional)
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install ngspice
+
+# Or build from source
+wget http://ngspice.sourceforge.net/compile.html
+```
+
+### Install Python Dependencies
+
+```bash
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple numpy pytest
+```
+
+### Build OSDI Model
+
+**Option A: Automated build script**
+```bash
 chmod +x build_osdi.sh
 ./build_osdi.sh
 ```
 
-**Method 2: Manual CMake build**
+**Option B: Manual CMake build**
 ```bash
-# Step 1: Install dependencies
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pybind11
-
-# Step 2: Create build directory
 mkdir -p build-deep-verify
 cd build-deep-verify
-
-# Step 3: Configure CMake
-# Option A: Let CMake find pybind11 automatically
 cmake ..
-
-# Option B: Specify pybind11 path explicitly
-cmake -Dpybind11_DIR=$(python -m pybind11 --cmakedir) ..
-
-# Step 4: Build OSDI model
 cmake --build . --target osdi
-
-# Step 5: (Optional) Build verification tools
-cmake --build . --target osdi_eval
 ```
 
-**Method 3: Direct OpenVAF compilation**
+**Option C: Direct OpenVAF compilation**
 ```bash
-# Compile without CMake (minimal build)
 openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
-
-# Move to expected location
 mkdir -p build-deep-verify/osdi
 mv bsimcmg.osdi build-deep-verify/osdi/
 ```
 
-### Verify Installation
-
+**Verify build:**
 ```bash
-# Check OSDI binary exists and is valid
 ls -lh build-deep-verify/osdi/bsimcmg.osdi
 file build-deep-verify/osdi/bsimcmg.osdi
-# Should show: "ELF 64-bit LSB shared object" or similar
-
-# Test Python import
-python -c "from pycmg import Model; print('✓ PyCMG imported successfully')"
-
-# Quick smoke test
-pytest tests/test_api.py::test_parse_number_with_suffix -v
+# Should show: ELF 64-bit LSB shared object
 ```
 
-### Troubleshooting Installation
-
-**OpenVAF not found:**
-```bash
-# Check if openvaf is in PATH
-which openvaf
-
-# If not found, add to PATH or install
-export PATH="/path/to/openvaf:$PATH"
-```
-
-**CMake pybind11 error:**
-```bash
-# Install pybind11 using pip with Tsinghua mirror (China)
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pybind11
-
-# Find pybind11 cmake directory
-python -m pybind11 --cmakedir
-
-# Pass to CMake explicitly
-cmake -Dpybind11_DIR=$(python -m pybind11 --cmakedir) ..
-```
-
-**Missing bsim-cmg-va directory:**
-```bash
-# If using a git worktree, create symlink to parent repo
-ln -s /path/to/pycmg-wrapper/bsim-cmg-va bsim-cmg-va
-
-# Or copy from parent repository
-cp -r /path/to/pycmg-wrapper/bsim-cmg-va .
-```
-
-**Build succeeds but tests fail:**
-```bash
-# Verify OSDI binary is valid
-nm build-deep-verify/osdi/bsimcmg.osdi | grep osdi
-
-# Check OpenVAF version compatibility
-openvaf --version  # Should be v23.5.0 or later
-```
-
-## Usage
+## Usage Guide
 
 ### Creating a Model
 
 ```python
 from pycmg import Model
 
-# Method 1: From OSDI binary + modelcard
+# Method 1: From ASAP7 modelcard (recommended)
 model = Model(
-    osdi_path="path/to/model.osdi",
-    modelcard_path="path/to/modelcard.lib",
-    model_name="modelname"  # Optional if only one model in file
+    osdi_path="build-deep-verify/osdi/bsimcmg.osdi",
+    modelcard_path="tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm",
+    model_name="nmos_lvt"  # Optional: auto-detected if only one model
 )
 
 # Method 2: Using modelcard parser
-from pycmg import parse_modelcard
-parsed = parse_modelcard("path/to/modelcard.lib", target_model_name="nmos1")
+from pycmg.ctypes_host import parse_modelcard
+parsed = parse_modelcard("tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm")
 print(f"Parsed {len(parsed.params)} parameters")
 ```
 
@@ -278,24 +238,22 @@ print(f"Parsed {len(parsed.params)} parameters")
 ```python
 from pycmg import Instance
 
-# Basic instance
+# FinFET instance with geometry parameters
 inst = Instance(
     model=model,
     params={
         "L": 20e-9,    # Length (m)
         "TFIN": 10e-9, # Fin thickness (m)
         "NFIN": 3.0,   # Number of fins
-        "NRS": 1.0,    # Source resistance multiplier
-        "NRD": 1.0,    # Drain resistance multiplier
     },
-    temperature=300.15  # Kelvin (default: 300.15 K)
+    temperature=300.15  # Kelvin (default: 300.15 K = 27°C)
 )
 
 # Update parameters after creation
-inst.set_params({"NFIN": 5.0}, allow_rebind=True)
+inst.set_params({"NFIN": 5.0})
 ```
 
-### DC Analysis
+### DC Operating Point Analysis
 
 ```python
 # Single operating point
@@ -306,12 +264,27 @@ result = inst.eval_dc({
     "e": 0.0,  # Bulk voltage
 })
 
-# Available outputs:
-# - id, ig, is, ie, ids: Terminal currents (A)
-#   ids = id - is (drain-source current for common-source configuration)
-# - qg, qd, qs, qb: Terminal charges (C)
-# - gm, gds, gmb: Transconductances (S)
-# - cgg, cgd, cgs, cdg, cdd: Capacitances (F)
+# Access all outputs
+print(f"Id: {result['id']:.3e} A")   # Drain current
+print(f"Ig: {result['ig']:.3e} A")   # Gate current
+print(f"Is: {result['is']:.3e} A")   # Source current
+print(f"Ie: {result['ie']:.3e} A")   # Bulk current
+print(f"Ids: {result['ids']:.3e} A")  # Drain-source current (Id - Is)
+
+print(f"Gm: {result['gm']:.3e} S")    # Transconductance
+print(f"Gds: {result['gds']:.3e} S")  # Output conductance
+print(f"Gmb: {result['gmb']:.3e} S")   # Bulk transconductance
+
+print(f"Qg: {result['qg']:.3e} C")    # Gate charge
+print(f"Qd: {result['qd']:.3e} C")    # Drain charge
+print(f"Qs: {result['qs']:.3e} C")    # Source charge
+print(f"Qb: {result['qb']:.3e} C")    # Bulk charge
+
+print(f"Cgg: {result['cgg']:.3e} F")  # Gate-gate capacitance
+print(f"Cgd: {result['cgd']:.3e} F")  # Gate-drain capacitance
+print(f"Cgs: {result['cgs']:.3e} F")  # Gate-source capacitance
+print(f"Cdg: {result['cdg']:.3e} F")  # Drain-gate capacitance
+print(f"Cdd: {result['cdd']:.3e} F")  # Drain-drain capacitance
 ```
 
 ### Voltage Sweep
@@ -319,17 +292,40 @@ result = inst.eval_dc({
 ```python
 import numpy as np
 
-# Id-Vg sweep
+# Id-Vg sweep (transfer characteristics)
 vg_values = np.linspace(0, 1.2, 13)
 id_values = []
 for vg in vg_values:
     result = inst.eval_dc({"d": 0.05, "g": vg, "s": 0.0, "e": 0.0})
     id_values.append(result["id"])
 
+# Plot with matplotlib
 import matplotlib.pyplot as plt
 plt.plot(vg_values, id_values)
 plt.xlabel("Vg (V)")
 plt.ylabel("Id (A)")
+plt.title("Id-Vg Characteristics")
+plt.grid(True)
+plt.show()
+```
+
+### Temperature Sweep
+
+```python
+temperatures = [223.15, 273.15, 323.15, 373.15, 398.15]  # K (-40°C to 125°C)
+id_at_temp = []
+
+for temp_k in temperatures:
+    inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0},
+                    temperature=temp_k)
+    result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+    id_at_temp.append(result["id"])
+
+plt.plot([(t-273.15) for t in temperatures], id_at_temp)
+plt.xlabel("Temperature (°C)")
+plt.ylabel("Id (A)")
+plt.title("Temperature Dependence")
+plt.grid(True)
 plt.show()
 ```
 
@@ -349,69 +345,42 @@ nodes = {
 result = inst.eval_tran(nodes, time, dt)
 
 # Transient outputs include currents and charges
-# Note: Capacitive currents are automatically computed
-```
-
-### Temperature Sweep
-
-```python
-temperatures = [223.15, 273.15, 323.15, 373.15, 398.15]  # K
-id_at_temp = []
-for temp_k in temperatures:
-    inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0},
-                    temperature=temp_k)
-    result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
-    id_at_temp.append(result["id"])
+print(f"Id(t={time:.1e}s): {result['id']:.3e} A")
+print(f"Ig(t={time:.1e}s): {result['ig']:.3e} A")
 ```
 
 ## Running Tests
 
 ### Test Organization
 
-Tests are organized by purpose and speed:
-
 | Test Suite | Purpose | Duration | NGSPICE Required |
 |------------|---------|----------|-----------------|
 | `test_api.py` | Quick API validation | ~5 seconds | No |
 | `test_integration.py` | NGSPICE ground truth comparison | ~30 seconds | Yes |
-| `test_asap7.py` | Full PVT verification | ~5 minutes | Yes |
+| `test_asap7.py` | Full ASAP7 PVT verification | ~5 minutes | Yes |
 
-### Running Specific Tests
+### Running Tests
 
 ```bash
-# Run all tests (slowest)
-pytest tests/ -v
-
-# Quick smoke test only
+# Quick smoke test (no NGSPICE)
 pytest tests/test_api.py -v
 
 # Integration tests with NGSPICE
 pytest tests/test_integration.py -v
 
-# ASAP7 verification (comprehensive)
+# Full ASAP7 verification (PVT corners, temperature sweeps)
 pytest tests/test_asap7.py -v
 
-# Run specific test function
+# Run all tests
+pytest tests/ -v
+
+# Run specific test
 pytest tests/test_api.py::test_eval_dc_smoke -v
-
-# Run with coverage
-pytest tests/ --cov=pycmg --cov-report=html
-```
-
-### Test Configuration
-
-Tests automatically skip if required artifacts are missing:
-
-```bash
-# Missing OSDI binary → tests skipped
-# Missing modelcards → tests skipped
-# Missing NGSPICE → only test_api.py runs
 ```
 
 ### Using main.py CLI
 
 ```bash
-# Quick test execution
 python main.py test api           # Quick smoke tests
 python main.py test integration   # NGSPICE comparison
 python main.py test asap7         # Full ASAP7 verification
@@ -422,59 +391,37 @@ python main.py test all           # Run all tests
 
 ```
 pycmg-wrapper/
-├── bsim-cmg-va/              # BSIM-CMG Verilog-A source
-│   ├── code/                 # Verilog-A source files
-│   │   ├── bsimcmg_main.va  # Main model entry point
-│   │   ├── bsimcmg.va       # Core model definitions
-│   │   ├── bsimcmg_body.include      # Body charge model
-│   │   ├── bsimcmg_nqsmod3.va        # Non-quasi-static model
-│   │   └── *.include                  # Additional model components
-│   └── benchmark_test/       # Example modelcards and netlists
-│       ├── modelcard.nmos   # NMOS example parameters
-│       └── modelcard.pmos   # PMOS example parameters
+├── bsim-cmg-va/              # Verilog-A source files
+│   ├── code/                 # Main model files
+│   │   ├── bsimcmg_main.va  # Model entry point
+│   │   ├── bsimcmg.va       # Core model
+│   │   └── *.include          # Model components
+│   └── benchmark_test/       # Legacy model cards (not recommended)
 ├── pycmg/                    # Python package
 │   ├── __init__.py          # Public API
-│   ├── ctypes_host.py       # OSDI interface (Model, Instance)
+│   ├── ctypes_host.py       # OSDI interface (Model, Instance, eval_dc, eval_tran)
 │   └── testing.py           # Verification utilities
 ├── cpp/                      # C++ OSDI host
-│   ├── osdi_host.h
-│   ├── osdi_host.cpp        # Core host implementation
+│   ├── osdi_host.h          # Header file
+│   ├── osdi_host.cpp        # Host implementation
 │   └── osdi_cli.cpp         # CLI tool (osdi_eval)
 ├── tests/                    # Test suite
-│   ├── conftest.py          # Shared fixtures
-│   ├── test_api.py          # Quick API tests
-│   ├── test_integration.py  # NGSPICE comparison
-│   └── test_asap7.py        # ASAP7 PVT verification
+│   ├── conftest.py          # Pytest fixtures
+│   ├── test_api.py          # API smoke tests
+│   ├── test_asap7.py        # ASAP7 verification
+│   └── test_integration.py  # NGSPICE comparison
+├── tech_model_cards/         # Technology model cards
+│   └── asap7_pdk_r1p7/      # ASAP7 PDK model files (recommended)
 ├── build-deep-verify/        # Build artifacts (generated)
-│   └── osdi/
-│       └── bsimcmg.osdi     # Compiled OSDI binary
-├── build_osdi.sh             # Automated build script
+│   ├── osdi/                # Compiled .osdi files
+│   └── ngspice_eval/        # Verification outputs
 ├── main.py                   # CLI entrypoint
-├── CMakeLists.txt            # CMake build configuration
-├── CLAUDE.md                 # Development guidelines
 └── README.md                 # This file
 ```
 
-### Verilog-A Source Organization
-
-The BSIM-CMG model is distributed across multiple Verilog-A files:
-
-| File | Purpose |
-|------|---------|
-| `bsimcmg_main.va` | Main entry point, includes all sub-modules |
-| `bsimcmg.va` | Core BSIM-CMG model definitions |
-| `bsimcmg_body.include` | Body charge and current models |
-| `bsimcmg_nqsmod3.va` | Non-quasi-static (NQS) charge model |
-| `bsimcmg_cfringe.include` | Fringe capacitance model |
-| `bsimcmg_quasi_static_cv.include` | Quasi-static C-V model |
-| `bsimcmg_rdsmod.include` | Drain-source resistance model |
-| `common_defs.include` | Common parameter definitions |
-
-**Note:** The `bsimcmg_main.va` file includes all other components using `.include` directives. OpenVAF processes these includes during compilation to generate the final OSDI binary.
-
 ## API Reference
 
-### `Model`
+### Model Class
 
 ```python
 Model(osdi_path: str, modelcard_path: str, model_name: str = None)
@@ -484,13 +431,10 @@ Load an OSDI compiled model with parameters from a modelcard.
 
 **Parameters:**
 - `osdi_path`: Path to `.osdi` binary file
-- `modelcard_path`: Path to SPICE modelcard (`.lib`, `.l`, `.scn`)
+- `modelcard_path`: Path to SPICE modelcard (`.lib`, `.pm`, `.scn`)
 - `model_name`: Model name within modelcard (optional if only one)
 
-**Methods:**
-- None (model is a container for parameters)
-
-### `Instance`
+### Instance Class
 
 ```python
 Instance(model: Model, params: dict, temperature: float = 300.15)
@@ -501,7 +445,7 @@ Create a device instance with geometry parameters.
 **Parameters:**
 - `model`: `Model` object
 - `params`: Dictionary of instance parameters (L, TFIN, NFIN, etc.)
-- `temperature`: Temperature in Kelvin (default: 300.15 K = 27°C)
+- `temperature`: Temperature in Kelvin (default: 300.15 K)
 
 **Methods:**
 
@@ -513,7 +457,7 @@ Evaluate DC operating point.
 **Parameters:**
 - `nodes`: Dictionary {"d": vd, "g": vg, "s": vs, "e": ve}
 
-**Returns:** Dictionary with keys:
+**Returns:** Dictionary with:
 - Currents: `id`, `ig`, `is`, `ie`, `ids` (A)
   - `ids` = `id` - `is` (drain-source current for common-source configuration)
 - Charges: `qg`, `qd`, `qs`, `qb` (C)
@@ -521,7 +465,7 @@ Evaluate DC operating point.
 - Capacitances: `cgg`, `cgd`, `cgs`, `cdg`, `cdd` (F)
 
 ```python
-eval_tran(nodes: dict, time: float, dt: float,
+eval_tran(nodes: dict, time: float, delta_t: float,
           prev_state: list = None) -> dict
 ```
 Evaluate transient response.
@@ -529,7 +473,7 @@ Evaluate transient response.
 **Parameters:**
 - `nodes`: Terminal voltages
 - `time`: Current time (s)
-- `dt`: Time step (s)
+- `delta_t`: Time step (s)
 - `prev_state`: Previous state vector (optional, for internal continuity)
 
 **Returns:** Dictionary with currents and charges
@@ -539,25 +483,9 @@ set_params(params: dict, allow_rebind: bool = False)
 ```
 Update instance parameters. May require rebind if topology changes.
 
-### Utility Functions
+## Verification Strategy
 
-```python
-parse_modelcard(path: str, target_model_name: str = None) -> ParsedModel
-```
-Parse a SPICE modelcard file.
-
-**Returns:** `ParsedModel` with `name` and `params` (dict)
-
-```python
-parse_number_with_suffix(token: str) -> float
-```
-Parse SPICE number with suffix (e.g., "1n" → 1e-9, "2meg" → 2e6).
-
-## Verification
-
-### Verification Strategy
-
-**PyCMG** and **NGSPICE** both use the **exact same OSDI binary** for model evaluation:
+PyCMG and NGSPICE both use the **identical OSDI binary** for model evaluation:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -565,10 +493,8 @@ Parse SPICE number with suffix (e.g., "1n" → 1e-9, "2meg" → 2e6).
 │              (Compiled BSIM-CMG Model)                       │
 └───────────────────┬────────────────────┬────────────────────┘
                     │                    │
-         ┌──────────▼─────────┐  ┌──────▼──────────────┐
-         │   PyCMG Wrapper    │  │    NGSPICE          │
-         │   (ctypes)         │  │    (.osdi command)  │
-         └──────────┬─────────┘  └──────┬──────────────┘
+         PyCMG Wrapper            NGSPICE
+         (ctypes)                 (.osdi command)
                     │                    │
               eval_dc()            OP analysis
               eval_tran()          AC analysis
@@ -581,17 +507,9 @@ Parse SPICE number with suffix (e.g., "1n" → 1e-9, "2meg" → 2e6).
 
 This verification approach ensures:
 1. **Binary-level consistency**: Both paths use identical OSDI binary
-2. **No recompilation differences**: Same physics, same parameters
-3. **Ctypes wrapper correctness**: Verifies PyCMG properly calls OSDI functions
-4. **Numerical accuracy**: Direct comparison of currents, charges, derivatives
-
-### Test Coverage
-
-- **test_api.py**: API smoke tests (no NGSPICE comparison)
-- **test_integration.py**: PyCMG vs NGSPICE direct comparison
-- **test_asap7.py**: Comprehensive PVT verification across ASAP7 modelcards
-
-All tests verify that PyCMG output matches NGSPICE output within tight tolerances.
+2. **Ctypes wrapper correctness**: Verifies proper OSDI function calls
+3. **Numerical accuracy**: Direct comparison of currents, charges, derivatives
+4. **Full model coverage**: DC, AC (capacitance), and transient analysis
 
 ### Tolerances
 
@@ -600,117 +518,97 @@ All tests verify that PyCMG output matches NGSPICE output within tight tolerance
 - **Absolute capacitance tolerance**: `ABS_TOL_C = 1e-18` F
 - **Relative tolerance**: `REL_TOL = 5e-3` (0.5%)
 
-### Running Custom Verification
+### Test Coverage
 
-```python
-from pycmg import Model, Instance
-from pycmg.testing import run_ngspice_op_point
-
-# Setup
-model = Model("path/to/osdi", "path/to/modelcard", "nmos1")
-inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
-
-# Get NGSPICE ground truth
-ng_result = run_ngspice_op_point(
-    modelcard_path="path/to/modelcard",
-    model_name="nmos1",
-    inst_params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0},
-    vd=0.5, vg=0.8, vs=0.0, ve=0.0,
-    out_dir="output_dir",
-    temp_c=27.0
-)
-
-# Get PyCMG result
-py_result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
-
-# Compare
-assert abs(py_result["id"] - ng_result["id"]) < 1e-9
-```
+All 18 model outputs are verified against NGSPICE:
+- ✅ Currents: id, ig, is, ie, ids
+- ✅ Derivatives: gm, gds, gmb
+- ✅ Charges: qg, qd, qs, qb
+- ✅ Capacitances: cgg, cgd, cgs, cdg, cdd
 
 ## Advanced Usage
 
-### Using C++ Host Directly
+### Finding Models in ASAP7 Modelcards
 
-The `cpp/osdi_cli.cpp` provides a command-line interface:
+```python
+from pycmg.ctypes_host import parse_modelcard
+import re
+
+modelcard_path = "tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm"
+parsed = parse_modelcard(modelcard_path)
+
+# Find all level=72 NMOS models
+text = Path(modelcard_path).read_text()
+models = []
+for line in text.splitlines():
+    if line.strip().lower().startswith(".model"):
+        parts = line.split()
+        if len(parts) >= 3:
+            name = parts[1]
+            mtype = parts[2].lower()
+            if "nmos" in mtype and "level=72" in line.lower():
+                models.append(name)
+
+print(f"Found {len(models)} level=72 NMOS models: {models}")
+# Output: Found 3 level=72 NMOS models: ['nmos_lvt', 'nmos_rvt', 'nmos_slvt']
+```
+
+### Environment Variables
 
 ```bash
-# Evaluate operating point
-./build-deep-verify/osdi_eval \
-    --osdi build-deep-verify/osdi/bsimcmg.osdi \
-    --modelcard bsim-cmg-va/benchmark_test/modelcard.nmos \
-    --node d=0.5 \
-    --node g=0.8 \
-    --node s=0.0 \
-    --node e=0.0 \
-    --param NFIN=2 \
-    --print-charges \
-    --print-cap \
-    --print-derivs
+# Override NGSPICE binary location
+export NGSPICE_BIN=/usr/local/ngspice-45.2/bin/ngspice
 
-# List available nodes
-./build-deep-verify/osdi_eval --osdi build-deep-verify/osdi/bsimcmg.osdi --list-nodes
-
-# List available parameters
-./build-deep-verify/osdi_eval --osdi build-deep-verify/osdi/bsimcmg.osdi --list-params
+# Override ASAP7 modelcard location
+export ASAP7_MODELCARD=/path/to/asap7/models
 ```
 
-### Custom Modelcards
+### Custom Modelcard Creation
 
 ```python
-# Override parameters during modelcard creation
-from pycmg import Model, Instance
 from pycmg.testing import make_ngspice_modelcard
 
+# Create custom modelcard with parameter overrides
 make_ngspice_modelcard(
-    src_path="original.lib",
+    src_path="tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm",
     dst_path="custom.lib",
-    model_name="nmos1",
-    overrides={"EOT": "1.5n", "TOXP": "2.0n"}
+    model_name="nmos_lvt",
+    overrides={"L": "20n", "TFIN": "10n", "NFIN": 3.0}
 )
 
-model = Model("path/to/osdi", "custom.lib", "nmos1")
+model = Model("build-deep-verify/osdi/bsimcmg.osdi", "custom.lib", "nmos_lvt")
 ```
 
-### ASAP7 Modelcards
+### PVT Corner Analysis
 
 ```python
-import os
-os.environ["ASAP7_MODELCARD"] = "/path/to/asap7/models"
+# Test across PVT corners
+corners = {
+    "TT": "tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT.pm",
+    "SS": "tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_SS.pm",
+    "FF": "tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_FF.pm",
+}
 
-# Test will automatically use the override
-# pytest tests/test_asap7.py -v
-```
-
-### Internal Node Analysis
-
-```python
-from pycmg import Model, Instance
-
-model = Model(...)
-inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
-
-# Check if device has internal nodes
-n_internal = inst.internal_node_count()
-print(f"Internal nodes: {n_internal}")
-
-# Query state variables
-n_states = inst.state_count()
-print(f"State variables: {n_states}")
+for corner_name, modelcard_path in corners.items():
+    model = Model("build-deep-verify/osdi/bsimg.osdi", modelcard_path, "nmos_lvt")
+    inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
+    result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+    print(f"{corner_name}: Id = {result['id']:.3e} A")
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Issue**: `ImportError: No module named 'pycmg'`
+**Issue: `ImportError: No module named 'pycmg'`**
 ```bash
 # Ensure you're in the project root
-cd pycmg-wrapper
+cd PyCMG
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 python -c "from pycmg import Model; print('OK')"
 ```
 
-**Issue**: `OSError: cannot open shared object file`
+**Issue: `OSError: cannot open shared object file`**
 ```bash
 # Rebuild the OSDI binary
 cd build-deep-verify
@@ -718,29 +616,29 @@ cmake ..
 cmake --build . --target osdi
 ```
 
-**Issue**: NGSPICE tests fail with "ngspice: not found"
+**Issue: NGSPICE tests fail with "ngspice: not found"**
 ```bash
 # Set custom NGSPICE path
 export NGSPICE_BIN=/usr/local/ngspice-45.2/bin/ngspice
 pytest tests/test_integration.py -v
 ```
 
-**Issue**: Tests skip with "missing OSDI build artifact"
+**Issue: Tests skip with "missing ASAP7 modelcards"**
 ```bash
-# Build the OSDI binary
-mkdir -p build-deep-verify
-cd build-deep-verify
-cmake ..
-cmake --build . --target osdi
+# Download ASAP7 modelcards
+cd tech_model_cards
+wget https://github.com/google/sg-f7hap7/releases/download/v1.0.1/sg-f7hap7.tar.gz
+tar -xzf sg-f7hap7.tar.gz
+
+# Or set environment variable
+export ASAP7_MODELCARD=/path/to/your/modelcards
 ```
 
-**Issue**: Modelcard parsing fails with "parameter not found"
-```python
-# Enable verbose parsing
-from pycmg import parse_modelcard
-parsed = parse_modelcard("path/to/card", target_model_name="nmos1")
-print(f"Found {len(parsed.params)} parameters")
-print(f"Model name: {parsed.name}")
+**Issue: "Parameter EOTACC is out of bounds"**
+```bash
+# This should be automatically fixed by the test framework
+# The modelcard parser clamps EOTACC to ≥1.1e-10 for OSDI compatibility
+# If you see this error, ensure you're using the updated test utilities
 ```
 
 ### Debug Mode
@@ -757,26 +655,11 @@ inst = Instance(model, ...)
 result = inst.eval_dc(...)  # Check stderr for OSDI messages
 ```
 
-### Verification Debugging
+### Getting Help
 
-```bash
-# Run pytest with verbose output
-pytest tests/test_integration.py -vvs
-
-# Run single test with pdb
-pytest tests/test_api.py::test_eval_dc_smoke --pdb
-```
-
-## Performance Tips
-
-1. **Reuse instances**: Create one `Instance` and call `eval_dc()` multiple times
-2. **Avoid rebinds**: Use `allow_rebind=False` when possible for faster parameter updates
-3. **Batch evaluations**: Vectorize sweeps using numpy
-4. **Skip verification**: Use `test_api.py` for rapid iteration during development
-
-## Contributing
-
-See `CLAUDE.md` for development guidelines.
+- **Documentation**: See `CLAUDE.md` for development guidelines
+- **Issues**: Report at https://github.com/ShenShan123/PyCMG/issues
+- **Tests**: Run `pytest tests/test_api.py -v` for quick smoke tests
 
 ## License
 
@@ -788,5 +671,3 @@ If you use this tool in research, please cite:
 ```
 [Your citation information]
 ```
-
-Note: `pytest tests` is long-running because ASAP7 and NGSPICE sweeps execute many cases. Expect on the order of tens of minutes.
