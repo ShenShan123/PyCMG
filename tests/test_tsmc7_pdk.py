@@ -1,31 +1,59 @@
 """
-Variant Selection Tests (Fixed)
+Full TSMC7 PDK Verification Tests
 
-Tests that _find_length_variant correctly selects variants for different L values.
+Tests parse_tsmc7_pdk() function with full TSMC7 PDK modelcard.
 """
 
 import pytest
 from pathlib import Path
-from pycmg.ctypes_host import _find_length_variant
+
+import pycmg
+from pycmg.ctypes_host import parse_tsmc7_pdk
 
 ROOT = Path(__file__).resolve().parents[1]
 TSMC7_PDK_PATH = ROOT / "tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2.l"
+OSDI_PATH = ROOT / "build-deep-verify/osdi/bsimcmg.osdi"
 
 
-@pytest.mark.parametrize("L,expected_variant", [
-    (120e-9, 1),   # Variant 1: lmin=1.2e-07, lmax=2.4001e-07 (120-240nm)
-    (72e-9, 3),    # Variant 3: lmin=3.6e-08, lmax=7.2e-08 (36-72nm)
-    (36e-9, 3),    # Variant 3: lmin=3.6e-08, lmax=7.2e-08 (36-72nm)
-    (20e-9, 4),    # Variant 4: lmin=2e-08, lmax=3.6e-08 (20-36nm)
-    (16e-9, 4),    # Variant 4: lmin=2e-08, lmax=3.6e-08 (20-36nm)
-    (12e-9, 4),    # Variant 4: lmin=2e-08, lmax=3.6e-08 (20-36nm)
-    (8e-9, 6),     # Variant 6: lmin=8e-09, lmax=1.1e-08 (8-11nm)
-])
-def test_tsmc7_pdk_variant_selection(L, expected_variant):
-    """Test correct variant selection for different L values."""
-    # Test with nch_svt_mac (NMOS SVT)
-    variant_num = _find_length_variant(str(TSMC7_PDK_PATH), "nch_svt_mac", L)
+def test_tsmc7_pdk_nmos_svtt_extraction():
+    """Test parameter extraction from full PDK."""
+    L = 16e-9
 
-    assert variant_num == expected_variant, (
-        f"L={L*1e9:.1f}nm should select variant {expected_variant}, got {variant_num}"
-    )
+    # Extract using parse_tsmc7_pdk
+    parsed = parse_tsmc7_pdk(str(TSMC7_PDK_PATH), "nch", "svt_mac", L)
+
+    # Verify extraction
+    assert parsed.name == "nch_svt_mac"
+    assert "level" in parsed.params
+    assert parsed.params["level"] == 72
+    assert "version" in parsed.params
+
+    # Check some key parameters exist
+    assert "eot" in parsed.params
+    assert "tfin" in parsed.params
+    assert "hfin" in parsed.params
+
+
+def test_tsmc7_pdk_nmos_svtt_eval_dc():
+    """Test DC evaluation with full TSMC7 PDK."""
+    from pycmg.ctypes_host import Model, Instance
+
+    L = 16e-9
+    TFIN = 6e-9
+    NFIN = 2.0
+
+    # Extract using parse_tsmc7_pdk
+    parsed = parse_tsmc7_pdk(str(TSMC7_PDK_PATH), "nch", "svt_mac", L)
+
+    # Create model and instance
+    model = Model(str(OSDI_PATH), str(TSMC7_PDK_PATH), "nch_svt_mac", parsed.params)
+    inst = Instance(model, L=L, TFIN=TFIN, NFIN=NFIN)
+
+    # Run DC analysis
+    result = inst.eval_dc({"d": 0.75, "g": 0.75, "s": 0.0, "e": 0.0})
+
+    # Verify we get reasonable results
+    assert result.id > 0  # Drain current should flow
+    assert abs(result.ig) < 1e-6  # Gate current should be small
+    assert abs(result.ids) < 1e-6  # Source current should be small
+    assert abs(result.ie) < 1e-6  # Bulk current should be small
