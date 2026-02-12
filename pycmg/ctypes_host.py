@@ -436,6 +436,245 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
     raise RuntimeError(f"no {expected} model found in modelcard: {path}")
 
 
+def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
+    """
+    Extract and merge model parameters from full TSMC7 PDK.
+
+    The TSMC7 PDK has a sophisticated structure with:
+    - .global model: base parameters for all variants
+    - .1 through .30 variants: length-binned models with lmin/lmax
+    - Subcircuit wrappers: not needed for OSDI (we use model directly)
+
+    Args:
+        path: Path to TSMC7 PDK file (e.g., cln7_1d8_sp_v1d2_2p2.l)
+        model_type: "nch" for NMOS, "pch" for PMOS
+        device_type: Device type - "svt_mac", "lvt_mac", "ulvt_mac", "18_mac", etc.
+        L: Gate length in meters (used for automatic variant selection)
+
+    Returns:
+        ParsedModel with merged global + variant parameters
+
+    Example:
+        >>> parse_tsmc7_pdk("cln7_1d8_sp_v1d2_2p2.l", "nch", "svt_mac", 16e-9)
+        ParsedModel(name="nch_svt_mac", params={...merged params...})
+    """
+    base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
+
+    # Extract global model parameters (base)
+    global_params = _extract_model_params(path, f"{base_name}.global", "nmos" if model_type == "nch" else "pmos")
+
+    # Find which variant matches the L value
+    variant_num = _find_length_variant(path, base_name, L)
+
+    # Extract variant model parameters
+    variant_params = _extract_model_params(path, f"{base_name}.{variant_num}", "nmos" if model_type == "nch" else "pmos")
+
+    # Merge: variant overrides global
+    merged_params = {**global_params, **variant_params}
+
+    return ParsedModel(name=base_name, params=merged_params)
+
+
+def _find_length_variant(path: str, base_name: str, L: float) -> int:
+    """
+    Find which length variant matches L value.
+
+    TSMC7 has 30 bins (numbered .1 through .30) with lmin/lmax ranges.
+    The bins are in descending order by length:
+    - .1:  lmin=1.2e-07  lmax=2.4001e-07 (240nm)
+    - .2:  lmin=7.2e-08  lmax=1.2e-07   (120nm)
+    - .3:  lmin=3.6e-08  lmax=7.2e-08   (72nm)
+    - ...
+    - .30: lmin=8e-09    lmax=1.1e-08   (11nm)
+
+    Args:
+        path: Path to TSMC7 PDK file
+        base_name: Base model name (e.g., "nch_svt_mac")
+        L: Gate length in meters
+
+    Returns:
+        Variant number (1-30)
+
+    Raises:
+        RuntimeError: If no variant matches the L value
+    """
+    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        trimmed = raw.strip()
+
+        # Skip comments and empty lines
+        if not trimmed or trimmed.startswith("*"):
+            idx += 1
+            continue
+
+        # Look for variant model definitions
+        if trimmed.lower().startswith(".model"):
+            # Check if this is a variant model for our base_name
+            parts = trimmed.split()
+            if len(parts) >= 3:
+                model_name = parts[1]
+
+                # Check if this is a numbered variant of our model (e.g., nch_svt_mac.4)
+                if model_name.lower().startswith(f"{base_name.lower()}."):
+                    variant_suffix = model_name[len(base_name) + 1:]  # Get number after dot
+
+                    # Only process numbered variants (1-30)
+                    if variant_suffix.isdigit():
+                        # Parse the model block to extract lmin/lmax
+                        block_lines = [trimmed]
+                        idx += 1
+                        while idx < len(lines):
+                            cont_raw = lines[idx]
+                            cont = cont_raw.strip()
+                            if not cont or cont.startswith("*"):
+                                idx += 1
+                                continue
+                            if cont.startswith("+"):
+                                block_lines.append(cont[1:].strip())
+                                idx += 1
+                                continue
+                            break
+
+                        # Extract lmin and lmax from this variant
+                        lmin = None
+                        lmax = None
+                        for line in block_lines:
+                            for match in assign_re.finditer(line):
+                                key = match.group(1).lower()
+                                val = parse_number_with_suffix(match.group(2))
+                                if key == "lmin":
+                                    lmin = val
+                                elif key == "lmax":
+                                    lmax = val
+
+                        # Check if L falls within this variant's range
+                        if lmin is not None and lmax is not None:
+                            if lmin <= L <= lmax:
+                                return int(variant_suffix)
+
+                    # Only process numbered variants (1-30)
+                    if variant_suffix.isdigit():
+                        # Parse the model block to extract lmin/lmax
+                        block_lines = [trimmed]
+                        idx += 1
+                        while idx < len(lines):
+                            cont_raw = lines[idx]
+                            cont = cont_raw.strip()
+                            if not cont or cont.startswith("*"):
+                                idx += 1
+                                continue
+                            if cont.startswith("+"):
+                                block_lines.append(cont[1:].strip())
+                                idx += 1
+                                continue
+                            break
+
+                        # Extract lmin and lmax from this variant
+                        lmin = None
+                        lmax = None
+                        for line in block_lines:
+                            for match in assign_re.finditer(line):
+                                key = match.group(1).lower()
+                                val = parse_number_with_suffix(match.group(2))
+                                if key == "lmin":
+                                    lmin = val
+                                elif key == "lmax":
+                                    lmax = val
+
+                        # Check if L falls within this variant's range
+                        if lmin is not None and lmax is not None:
+                            if lmin <= L <= lmax:
+                                return int(variant_suffix)
+
+        idx += 1
+
+    raise RuntimeError(f"No length variant found for {base_name} with L={L:.3e} in file: {path}")
+
+
+def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dict[str, float]:
+    """
+    Extract parameters from a single .model block in TSMC7 PDK.
+
+    Reads from the model name match to the next non-continuation line.
+    Parses all key=value pairs with SPICE number suffix support.
+
+    Args:
+        path: Path to TSMC7 PDK file
+        model_name: Full model name including suffix (e.g., "nch_svt_mac.global" or "nch_svt_mac.4")
+        expected_type: Expected model type ("nmos" or "pmos")
+
+    Returns:
+        Dictionary of parameter names to float values
+
+    Raises:
+        RuntimeError: If model not found
+    """
+    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    # Build the exact pattern to match
+    # TSMC7 uses format: .model nch_svt_mac.global nmos (
+    target_pattern = f".model {model_name} {expected_type}"
+
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        trimmed = raw.strip()
+
+        # Skip comments and empty lines
+        if not trimmed or trimmed.startswith("*"):
+            idx += 1
+            continue
+
+        # Look for the target model
+        if trimmed.lower().startswith(".model"):
+            # Check if this matches our target
+            # Need to be careful with case sensitivity
+            if model_name in trimmed and expected_type in trimmed.lower():
+                # Found it - parse the block
+                block_lines = [trimmed]
+                idx += 1
+                while idx < len(lines):
+                    cont_raw = lines[idx]
+                    cont = cont_raw.strip()
+                    if not cont or cont.startswith("*"):
+                        idx += 1
+                        continue
+                    if cont.startswith("+"):
+                        block_lines.append(cont[1:].strip())
+                        idx += 1
+                        continue
+                    break
+
+                # Parse parameters from the block
+                params: Dict[str, float] = {}
+                for line in block_lines:
+                    for match in assign_re.finditer(line):
+                        key = match.group(1)
+                        val = match.group(2)
+                        parsed = parse_number_with_suffix(val)
+
+                        # Apply EOTACC clamping for OSDI compatibility
+                        if key.lower() == "eotacc" and parsed < 1.1e-10:
+                            parsed = 1.10e-10
+
+                        params[key] = parsed
+
+                return params
+
+        idx += 1
+
+    raise RuntimeError(f"Model {model_name} (type={expected_type}) not found in file: {path}")
+
+
 def _check_init_result(desc: Optional[OsdiDescriptor], info: OsdiInitInfo) -> None:
     def _cleanup() -> None:
         if info.num_errors != 0 and info.errors:
