@@ -1312,4 +1312,126 @@ class Instance:
         return out
 
 
-__all__ = ["Model", "Instance", "parse_number_with_suffix"]
+def select_tsmc7_variant(modelcard_path: str, model_type: str, L: float) -> str:
+    """
+    Select the appropriate TSMC7 model variant based on device length.
+
+    TSMC7 modelcards have multiple variants (e.g., nch_svt_mac.1, .2, etc.)
+    with different L ranges defined by lmin and lmax parameters.
+    This function reads the modelcard and returns the full model name
+    (including variant suffix) that matches the given device length.
+
+    Args:
+        modelcard_path: Path to TSMC7 .l file
+        model_type: Base model name (e.g., "nch_svt_mac")
+        L: Device length in meters
+
+    Returns:
+        Full model name with variant (e.g., "nch_svt_mac.5")
+
+    Raises:
+        ValueError: If no variant matches the given L, or if modelcard is invalid
+    """
+    # Escape special regex characters in model_type
+    model_type_escaped = re.escape(model_type)
+    # Match both nmos and pmos models
+    variant_pattern = re.compile(
+        rf'\.model ({model_type_escaped}\.\d+) (nmos|pmos)'
+    )
+
+    # Read and parse the modelcard
+    variants = []
+    with open(modelcard_path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        # Look for model definition
+        match = variant_pattern.match(line.strip())
+        if match:
+            variant_name = match.group(1)
+            lmin = None
+            lmax = None
+
+            # First, check the initial .model line for lmin and lmax
+            # (some models like pch have them on the same line)
+            lmin_match = re.search(r'\blmin\s*=\s*([0-9eE+\-\.]+)', line)
+            lmax_match = re.search(r'\blmax\s*=\s*([0-9eE+\-\.]+)', line)
+
+            if lmin_match:
+                lmin = parse_number_with_suffix(lmin_match.group(1))
+            if lmax_match:
+                lmax = parse_number_with_suffix(lmax_match.group(1))
+
+            # If not found on the initial line, scan continuation lines
+            if lmin is None or lmax is None:
+                j = idx + 1
+                while j < len(lines):
+                    param_line = lines[j]
+                    if not param_line.startswith("+"):
+                        # End of model block
+                        break
+
+                    # Extract lmin and lmax
+                    if lmin is None:
+                        lmin_match = re.search(r'\blmin\s*=\s*([0-9eE+\-\.]+)', param_line)
+                        if lmin_match:
+                            lmin = parse_number_with_suffix(lmin_match.group(1))
+
+                    if lmax is None:
+                        lmax_match = re.search(r'\blmax\s*=\s*([0-9eE+\-\.]+)', param_line)
+                        if lmax_match:
+                            lmax = parse_number_with_suffix(lmax_match.group(1))
+
+                    # Once we have both, we can stop scanning this model
+                    if lmin is not None and lmax is not None:
+                        break
+
+                    j += 1
+
+            # Only add variants that have both lmin and lmax
+            if lmin is not None and lmax is not None:
+                variants.append({
+                    "name": variant_name,
+                    "lmin": lmin,
+                    "lmax": lmax
+                })
+
+        idx += 1
+
+    if not variants:
+        raise ValueError(
+            f"No TSMC7 variants found for model '{model_type}' in {modelcard_path}"
+        )
+
+    # Find the best matching variant
+    # L should satisfy: lmin <= L <= lmax
+    # For overlapping ranges, prefer the variant with the smallest range
+    # (i.e., the most precise match)
+    matching_variants = [
+        v for v in variants
+        if v["lmin"] <= L <= v["lmax"]
+    ]
+
+    if not matching_variants:
+        # No match found - provide helpful error message
+        # Sort variants by lmin for better error display
+        sorted_variants = sorted(variants, key=lambda v: v["lmin"])
+
+        ranges_str = ", ".join(
+            f"{v['name']} ({v['lmin']:.3e} to {v['lmax']:.3e})"
+            for v in sorted_variants
+        )
+
+        raise ValueError(
+            f"No TSMC7 variant found for L={L:.3e}. "
+            f"Available ranges for {model_type}: {ranges_str}"
+        )
+
+    # Select the variant with the smallest range (most precise match)
+    best_variant = min(matching_variants, key=lambda v: v["lmax"] - v["lmin"])
+    return best_variant["name"]
+
+
+__all__ = ["Model", "Instance", "parse_number_with_suffix", "select_tsmc7_variant"]

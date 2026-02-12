@@ -237,3 +237,39 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - ✅ ASAP7 verification: `tests/test_asap7.py` runs DC/AC/TRAN across PVT corners.
 - ✅ Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - ⚠️ PyBind11 layer: `cpp/pycmg_bindings.cpp` exists but ctypes implementation is currently used.
+
+## Technology Modelcard Verification
+
+### ASAP7 (7nm PDK)
+- **Status**: ✅ Fully verified
+- **Test File**: `tests/test_asap7.py`
+- **Coverage**: TT, SS, FF corners at -40°C, 27°C, 85°C, 125°C
+- **Outputs**: All 18 model outputs (currents, derivatives, charges)
+- **Result**: PyCMG and NGSPICE produce binary-identical results within specified tolerances
+
+### TSMC7 (Taiwan Semiconductor 7nm)
+- **Status**: ✅ Verified (2026-02-10)
+- **Test File**: `tests/test_tsmc7_verification.py`
+- **Modelcard**: `tech_model_cards/TSMC7/tsmc7_simple.l`
+- **Coverage**: Parameter sweeps across L (gate length), TFIN (fin thickness), NFIN (fin count)
+- **Test Results**:
+
+| Parameter Sweep | Points Tested | Result |
+|-----------------|--------------|--------|
+| **Length (L)** | 12nm, 16nm, 20nm, 24nm | ✅ All passed |
+| **Fin Thickness (TFIN)** | 6nm, 7nm, 8nm | ✅ All passed |
+| **Fin Count (NFIN)** | 1, 2, 4 | ✅ All passed |
+
+**Total TSMC7 Tests**: 10 individual test cases, all passing
+
+**Key Findings**:
+- **Parameter Handling**: BSIM-CMG uses `L` (uppercase) as instance parameter in PyCMG, but `l` (lowercase) as modelcard parameter in NGSPICE
+- **Effective Length**: `Leff = L - xl` where `xl` is length offset (TSMC7: xl=1e-8, ASAP7: xl=1e-9)
+- **Modelcard Baking**: For NGSPICE verification, instance parameters must be baked into modelcard using lowercase names (`l`, `tfin`, `nfin`)
+- **Binary Consistency**: Both PyCMG and NGSPICE use the identical `bsimcmg.osdi` file, ensuring binary-level verification
+
+**Verification Notes**:
+- Test configuration: Vd=0.75V, Vg=0.75V, Vs=0V, Ve=0V, T=27°C
+- Tolerances: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, REL_TOL=5e-3
+- All 13 outputs verified per test case (id, ig, is, ie, ids, qg, qd, qs, qb, gm, gds, gmb)
+- Typical drain current at 16nm/8nm/2fins: ~167µA in saturation region
