@@ -1,3 +1,5 @@
 .worktrees/
 build-pycmg*/
 pycmg/*.so
+build-deep-verify/
+__pycache__/

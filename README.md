@@ -358,6 +358,15 @@ print(f"Ig(t={time:.1e}s): {result['ig']:.3e} A")
 | `test_api.py` | Quick API validation | ~5 seconds | No |
 | `test_integration.py` | NGSPICE ground truth comparison | ~30 seconds | Yes |
 | `test_asap7.py` | Full ASAP7 PVT verification | ~5 minutes | Yes |
+| `test_tsmc7_verification.py` | TSMC7 parameter sweeps | ~30 seconds | Yes |
+
+**TSMC7 Verification Status**: ✅ Complete (10 test cases)
+
+- Tests L sweep: 12nm, 16nm, 20nm, 24nm (4 tests)
+- Tests TFIN sweep: 6nm, 7nm, 8nm (3 tests)
+- Tests NFIN sweep: 1, 2, 4 fins (3 tests)
+
+All tests verify binary-identical results between PyCMG and NGSPICE.
 
 ### Running Tests
 
@@ -529,6 +538,18 @@ All 18 model outputs are verified against NGSPICE:
 ## Advanced Usage
 
 ### Finding Models in ASAP7 Modelcards
+
+### TSMC7 Model Verification
+
+TSMC7 (Taiwan Semiconductor Manufacturing Company) 7nm modelcard verification is available in `tests/test_tsmc7_verification.py`. The test suite performs parametrized sweeps across:
+
+| Parameter Sweep | Points | Tests |
+|----------------|--------|-------|
+| Gate Length (L) | 12, 16, 20, 24nm | 4 |
+| Fin Thickness (TFIN) | 6, 7, 8nm | 3 |
+| Fin Count (NFIN) | 1, 2, 4 fins | 3 |
+
+All 10 test cases verify binary-identical results between PyCMG and NGSPICE using the same `bsimcmg.osdi` file.
 
 ```python
 from pycmg.ctypes_host import parse_modelcard

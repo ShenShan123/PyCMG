@@ -1,0 +1,22 @@
+* Test TSMC7 fixed modelcard loading with NGSPICE
+* This test just verifies the file loads without syntax errors
+
+.include "tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean_fixed.l"
+
+* Test that we can access one of the fixed subcircuits
+* Test pnp_i2_mac (one of the ones that had missing .ends)
+* .subckt pnp_i2_mac c b e multi='1' _par_bjtp1='par_bjtp1' _par_bjtp2='par_bjtp2' _par_bjtp3='par_bjtp3' _par_bjtp4='par_bjtp4' mismatchflag='mismatchflag_bip' _local_factor='local_factor_bip'
+
+* Instantiate the pnp subcircuit
+X1 collector base emitter pnp_i2_mac multi=1
+
+* Apply bias
+Vc collector 0 1.0
+Vb base 0 0.7
+Ve emitter 0 0.0
+
+* DC operating point
+.op
+
+* End
+.end

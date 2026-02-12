@@ -1,0 +1,21 @@
+* Test TSMC7 fixed modelcard with NGSPICE
+* Test a simple subcircuit instantiation
+
+.include "tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean_fixed.l"
+
+* Test npode_svt_mac subcircuit (one of the fixed ones)
+* .subckt npode_svt_mac n1 n2 n3 l=length w=1e-10 nfin=0.01
+
+* Instantiate a simple test
+X1 d g s npode_svt_mac l=30n w=1n nfin=10
+
+* Apply bias
+Vd d 0 0.5
+Vg g 0 0.8
+Vs s 0 0.0
+
+* DC operating point
+.op
+
+* End
+.end
