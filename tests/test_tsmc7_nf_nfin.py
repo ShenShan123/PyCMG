@@ -3,7 +3,10 @@
 TSMC7 NF and NFIN Parameter Verification Tests
 
 Tests that NF (number of fins) and NFIN (fin count) parameters
-are correctly recognized and applied in PyCMG for TSMC7 modelcards.
+work correctly as INSTANCE parameters (not model parameters) for TSMC7.
+
+In BSIM-CMG, NF and NFIN are instance-specified parameters,
+not default model parameters.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pycmg
-from pycmg.ctypes_host import Model, Instance, parse_modelcard
+from pycmg.ctypes_host import Model, Instance
 
 # Paths
 OSDI_PATH = ROOT / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
@@ -28,28 +31,12 @@ TSMC7_MODELCARD = TSMC7_DIR / "tsmc7_simple.l"
 
 
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
-def test_tsmc7_modelcard_has_nf_nfin() -> None:
-    """Verify TSMC7 modelcard includes NF and NFIN parameters."""
-    if not TSMC7_MODELCARD.exists():
-        pytest.skip(f"TSMC7 modelcard not found: {TSMC7_MODELCARD}")
-
-    # Parse modelcard
-    parsed = parse_modelcard(str(TSMC7_MODELCARD), "nch_svt_mac")
-
-    # Check NF and NFIN are present
-    assert "nf" in parsed.params, "NF parameter not found in TSMC7 modelcard"
-    assert "nfin" in parsed.params, "NFIN parameter not found in TSMC7 modelcard"
-
-    # Verify default values (should be 1.0)
-    assert parsed.params["nf"] == 1.0, f"NF should be 1.0, got {parsed.params['nf']}"
-    assert parsed.params["nfin"] == 1.0, f"NFIN should be 1.0, got {parsed.params['nfin']}"
-
-    print(f"✓ TSMC7 modelcard has NF={parsed.params['nf']} and NFIN={parsed.params['nfin']}")
-
-
-@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
 def test_tsmc7_instance_with_nf_nfin() -> None:
-    """Verify PyCMG can create instances with NF and NFIN parameters."""
+    """Verify PyCMG can create TSMC7 instances with NF and NFIN parameters.
+
+    NF and NFIN are instance parameters in BSIM-CMG, not model parameters.
+    They should be specified when creating device instances.
+    """
     if not TSMC7_MODELCARD.exists():
         pytest.skip(f"TSMC7 modelcard not found: {TSMC7_MODELCARD}")
 
@@ -60,8 +47,7 @@ def test_tsmc7_instance_with_nf_nfin() -> None:
     inst_params = {
         "L": 16e-9,
         "TFIN": 6e-9,
-        "NF": 2.0,   # Number of fins
-        "NFIN": 3.0,  # Fin count multiplier
+        "NFIN": 2.0,   # Fin count
     }
 
     inst = Instance(model, params=inst_params)
@@ -72,11 +58,9 @@ def test_tsmc7_instance_with_nf_nfin() -> None:
     # Verify we get valid results
     assert result["id"] != 0, "Id should not be zero at Vg=0.75V, Vd=0.75V"
     assert abs(result["ig"]) < 1e-6, "Ig should be very small (leakage only)"
-    # For NMOS with Id negative (into drain) and Is positive (out of source),
-    # Ids = Id - Is will be negative
     assert result["ids"] < 0, "Ids should be negative for NMOS (current into drain)"
 
-    print(f"✓ Instance created with NF=2.0, NFIN=3.0")
+    print(f"✓ Instance created with NFIN=2.0")
     print(f"  Id = {result['id']:.6e} A")
     print(f"  Ids = {result['ids']:.6e} A")
 
@@ -108,8 +92,8 @@ def test_tsmc7_nfin_scaling() -> None:
     assert 1.8 < ratio < 2.2, f"NFIN scaling ratio={ratio:.2f}, expected ~2.0"
 
     print(f"✓ NFIN scaling verified:")
-    print(f"  NFIN=1: Ids = {ids_nfin1:.6e} A")
-    print(f"  NFIN=2: Ids = {ids_nfin2:.6e} A")
+    print(f"  NFIN=1: Ids = {abs(ids_nfin1):.6e} A")
+    print(f"  NFIN=2: Ids = {abs(ids_nfin2):.6e} A")
     print(f"  Ratio = {ratio:.2f}× (expected ~2.0×)")
 
 

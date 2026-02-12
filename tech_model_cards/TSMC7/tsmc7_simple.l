@@ -154,8 +154,6 @@
 + vtsswgd = 10
 + vtsswgs = 10
 + vtssws = 10
-+ nf = 1
-+ nfin = 1
 
 + tss = 2.565e-4
 + tnom = 25
@@ -313,8 +311,6 @@
 + vtsswgd = 10
 + vtsswgs = 10
 + vtssws = 10
-+ nf = 1
-+ nfin = 1
 + tss = 2.565e-4
 + tnom = 25
 + devtype = 0
