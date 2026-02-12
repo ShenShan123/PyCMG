@@ -368,6 +368,11 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
                 if _to_lower(key) == "eotacc" and parsed < 1.1e-10:
                     parsed = 1.10e-10
                 parsed_params[key] = parsed
+                if _to_lower(key) == "nf":
+                    parsed = 1.0  # Single-fin default
+                parsed_params[key] = parsed
+                if _to_lower(key) == "nfin":
+                    parsed = 1.0  # Single-fin default
         return parsed_params
 
     def _is_valid_model(model_type: str, params: Dict[str, float]) -> bool:
