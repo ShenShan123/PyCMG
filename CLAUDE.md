@@ -221,6 +221,39 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 * Enable the "Explanatory" or "Learning" output style in /config to explain the *why* behind its changes.
 
 ## Lessons from Bugs (Keep Coming)
+
+### ASAP7 Deep Dive Analysis (2026-02-13 Round 3)
+- **Critical parameter storage bug**: Both `parse_modelcard()` and `_extract_model_params()` stored parameters with original case (e.g., "EOT", "L", "NFIN") instead of lowercase. This caused parameter lookup failures when the code tried to access them using lowercase comparisons. Fixed by storing all parameters as lowercase: `parsed_params[_to_lower(key)] = parsed`.
+- **nfin default value bug**: The `nfin` default value (1.0) was set but never stored back to `parsed_params` because the code had a double-assignment pattern that left the last conditional branch without a storage statement. Fixed by using a single assignment at the end after all conditionals.
+- **ASAP7 path configuration**: Test file had hardcoded path `asap7_pdk_r1p7/models/hspice` but actual directory is `ASAP7`. Fixed by updating path.
+- **ASAP7 PMOS DEVTYPE issue**: PMOS models exhibit inverted behavior due to missing or incorrect `devtype` parameter. Standard ASAP7 files don't include `devtype = 0.0` for PMOS. Workaround: Use `7nm_TT_160803_with_devtype.pm` for PMOS testing.
+- **Test infrastructure gap**: ASAP7 tests only verify NMOS devices; no PMOS verification tests exist. This should be addressed once DEVTYPE issue is resolved.
+
+### Modelcard Parsing & Parameter Handling (2026-02-13 Round 1)
+- **Double assignment bug in `_parse_params()`**: The original code had `parsed_params[key] = parsed` followed by conditional blocks that modified `parsed` without storing back. This caused `nfin` defaults to never be applied. Fixed by using `if-elif-elif` chain with single assignment at end.
+- **SPICE suffix capture**: When updating regex patterns, ensure the `[a-zA-Z]*` suffix pattern remains INSIDE the value capture group, otherwise suffixes like `n`, `p`, `u` are lost during parsing.
+- **Scientific notation regex**: The pattern `[0-9eE+\-\.]+` was fragile because it matched `+` and `-` in any position. Use `[0-9]*\.?[0-9]+(?:[eE][+\-]?[0-9]+)?` for proper scientific notation.
+- **EOTACC clamping inconsistency**: Different thresholds were used in `parse_modelcard()` vs `_make_ngspice_modelcard()`. Standardized to `<= 1.0e-10` → `1.1e-10` across all locations (Python, C++ CLI, C++ bindings).
+- **Parameter validation**: Added checks for NaN, inf, and inappropriate negative values in `OsdiModel.set_param()` to prevent silent corruption.
+
+### Case Sensitivity & Parameter Storage (2026-02-13 Round 2)
+- **Case-insensitive parameter storage**: Both `parse_modelcard()` and `_extract_model_params()` were storing parameters with original case from files, but used `_to_lower()` for comparisons. This caused lookup failures. Fixed by storing all parameters as lowercase keys: `params[_to_lower(key)] = parsed`.
+- **TSMC7 PDK robustness**: Added explicit `.global` variant handling in `_find_length_variant()` with warning messages for unexpected non-numeric suffixes. Improved error messages when `.global` model is missing.
+
+### Testing & Verification (2026-02-13 Round 1)
+- **Assertion tolerance selection**: The `_assert_close()` function was using `ABS_TOL_I` (1e-9) for ALL parameters, but charges need `ABS_TOL_Q` (1e-18). Added auto-selection based on parameter name.
+- **Temperature list completeness**: Test documentation mentioned -40°C but `TEST_TEMPS` list was missing it. Added -40.0°C for comprehensive temperature coverage.
+- **Model file naming**: PVT_CORNERS dict used hard-coded `.pm` extensions that didn't match actual files. Changed to base patterns for glob matching.
+
+### Documentation (2026-02-13 Round 2)
+- **Temperature units documentation**: Added comprehensive docstrings explaining that ALL temperatures in the module are in KELVIN. Provided conversion formula `temp_K = temp_C + 273.15` and practical examples for common temperatures (-40°C, 27°C, 85°C, 125°C).
+- **Accessible documentation**: Users can now access via `help(pycmg.ctypes_host)`, `help(Model)`, `help(Instance)`, etc.
+
+### Code Quality (2026-02-13 Round 1 & 2)
+- **Duplicate code removal**: Removed 33 lines of duplicate code in `_find_length_variant()` that was processing variants twice.
+- **Error handling**: Added helpful error messages in `parse_tsmc7_pdk()` when `.global` model is missing, with diagnostic information.
+
+### Earlier Bugs
 - Modelcard parsing must handle spaced `PARAM = VALUE` and exponent `1e+22`; otherwise key params (NBODY/NSD/NSEG/GEOMOD) silently default and mismatch ngspice.
 - OSDI init out-of-bounds errors should be treated as warnings (matching ngspice behavior), not fatal.
 - Some OSDI params are integer-typed; read/write using `PARA_TY_INT` to avoid garbage values.

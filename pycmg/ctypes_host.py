@@ -1,4 +1,33 @@
 from __future__ import annotations
+"""
+PyCMG ctypes-based OSDI interface
+
+TEMPERATURE UNITS:
+==================
+All temperature values in this module are in KELVIN (K).
+
+- Internal OSDI model temperature: KELVIN
+- Instance initialization temperature parameter: KELVIN
+- User-facing temperature API: KELVIN
+
+To convert from Celsius to Kelvin:
+    temp_K = temp_C + 273.15
+
+Example:
+    # Room temperature (25°C) in Kelvin
+    temp_K = 25.0 + 273.15  # = 298.15 K
+
+    inst = Instance(model, params={"L": 16e-9}, temperature=298.15)
+
+Common temperatures:
+    -40°C  →  233.15 K  (cold start)
+     0°C  →  273.15 K  (freezing point)
+    25°C  →  298.15 K  (room temperature)
+    27°C  →  300.15 K  (TSMC typical)
+    85°C  →  358.15 K  (operating hot)
+   125°C  →  398.15 K  (max junction)
+"""
+
 
 import ctypes
 import ctypes.util
@@ -364,15 +393,15 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
             for match in assign_re.finditer(line):
                 key = match.group(1)
                 val = match.group(2)
+                key_lower = _to_lower(key)
                 parsed = parse_number_with_suffix(val)
-                if _to_lower(key) == "eotacc" and parsed < 1.1e-10:
-                    parsed = 1.10e-10
-                parsed_params[key] = parsed
-                if _to_lower(key) == "nf":
+                if key_lower == "eotacc" and parsed <= 1.0e-10:
+                    parsed = 1.1e-10
+                if key_lower == "nf":
                     parsed = 1.0  # Single-fin default
-                parsed_params[key] = parsed
-                if _to_lower(key) == "nfin":
+                if key_lower == "nfin":
                     parsed = 1.0  # Single-fin default
+                parsed_params[key_lower] = parsed
         return parsed_params
 
     def _is_valid_model(model_type: str, params: Dict[str, float]) -> bool:
@@ -459,15 +488,28 @@ def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> P
         ParsedModel(name="nch_svt_mac", params={...merged params...})
     """
     base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
+    expected_type = "nmos" if model_type == "nch" else "pmos"
 
     # Extract global model parameters (base)
-    global_params = _extract_model_params(path, f"{base_name}.global", "nmos" if model_type == "nch" else "pmos")
+    try:
+        global_params = _extract_model_params(path, f"{base_name}.global", expected_type)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"TSMC7 PDK file '{path}' does not contain the expected .global model "
+            f"'{base_name}.global'. This usually means:\n"
+            f"  1. The file is not a valid TSMC7 PDK file\n"
+            f"  2. The model_type '{model_type}' and device_type '{device_type}' combination "
+            f"does not exist in this PDK\n"
+            f"  3. The PDK file format has changed\n\n"
+            f"Expected model: .model {base_name}.global {expected_type} (...)\n"
+            f"Original error: {e}"
+        ) from e
 
     # Find which variant matches the L value
     variant_num = _find_length_variant(path, base_name, L)
 
     # Extract variant model parameters
-    variant_params = _extract_model_params(path, f"{base_name}.{variant_num}", "nmos" if model_type == "nch" else "pmos")
+    variant_params = _extract_model_params(path, f"{base_name}.{variant_num}", expected_type)
 
     # Merge: variant overrides global
     merged_params = {**global_params, **variant_params}
@@ -486,6 +528,11 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
     - .3:  lmin=3.6e-08  lmax=7.2e-08   (72nm)
     - ...
     - .30: lmin=8e-09    lmax=1.1e-08   (11nm)
+
+    Supported variant suffixes:
+    - Numeric (.1, .2, ..., .30): Length-binned models with lmin/lmax
+    - .global: Base parameters (handled separately in parse_tsmc7_pdk)
+    - Other non-numeric suffixes: Logged as warnings and skipped
 
     Args:
         path: Path to TSMC7 PDK file
@@ -520,9 +567,14 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
             if len(parts) >= 3:
                 model_name = parts[1]
 
-                # Check if this is a numbered variant of our model (e.g., nch_svt_mac.4)
+                # Check if this is a variant of our model (e.g., nch_svt_mac.4 or nch_svt_mac.global)
                 if model_name.lower().startswith(f"{base_name.lower()}."):
-                    variant_suffix = model_name[len(base_name) + 1:]  # Get number after dot
+                    variant_suffix = model_name[len(base_name) + 1:]  # Get suffix after dot
+
+                    # Skip .global variant (handled separately in parse_tsmc7_pdk)
+                    if variant_suffix.lower() == "global":
+                        idx += 1
+                        continue
 
                     # Only process numbered variants (1-30)
                     if variant_suffix.isdigit():
@@ -557,45 +609,17 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
                         if lmin is not None and lmax is not None:
                             if lmin <= L <= lmax:
                                 return int(variant_suffix)
-
-                    # Only process numbered variants (1-30)
-                    if variant_suffix.isdigit():
-                        # Parse the model block to extract lmin/lmax
-                        block_lines = [trimmed]
-                        idx += 1
-                        while idx < len(lines):
-                            cont_raw = lines[idx]
-                            cont = cont_raw.strip()
-                            if not cont or cont.startswith("*"):
-                                idx += 1
-                                continue
-                            if cont.startswith("+"):
-                                block_lines.append(cont[1:].strip())
-                                idx += 1
-                                continue
-                            break
-
-                        # Extract lmin and lmax from this variant
-                        lmin = None
-                        lmax = None
-                        for line in block_lines:
-                            for match in assign_re.finditer(line):
-                                key = match.group(1).lower()
-                                val = parse_number_with_suffix(match.group(2))
-                                if key == "lmin":
-                                    lmin = val
-                                elif key == "lmax":
-                                    lmax = val
-
-                        # Check if L falls within this variant's range
-                        if lmin is not None and lmax is not None:
-                            if lmin <= L <= lmax:
-                                return int(variant_suffix)
+                    else:
+                        # Log warning for unexpected non-numeric variant suffix
+                        # This helps with debugging if new variant types are added
+                        sys.stderr.write(
+                            f"Warning: Skipping unexpected variant '{model_name}' "
+                            f"(suffix '{variant_suffix}' is not numeric or 'global')\n"
+                        )
 
         idx += 1
 
     raise RuntimeError(f"No length variant found for {base_name} with L={L:.3e} in file: {path}")
-
 
 def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dict[str, float]:
     """
@@ -660,13 +684,14 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
                     for match in assign_re.finditer(line):
                         key = match.group(1)
                         val = match.group(2)
+                        key_lower = _to_lower(key)
                         parsed = parse_number_with_suffix(val)
 
                         # Apply EOTACC clamping for OSDI compatibility
-                        if key.lower() == "eotacc" and parsed < 1.1e-10:
-                            parsed = 1.10e-10
+                        if key_lower == "eotacc" and parsed <= 1.0e-10:
+                            parsed = 1.1e-10
 
-                        params[key] = parsed
+                        params[key_lower] = parsed
 
                 return params
 
@@ -1212,6 +1237,26 @@ def apply_param(desc: OsdiDescriptor,
 
 
 class Model:
+    """
+    BSIM-CMG model wrapper for OSDI binary interface.
+
+    The Model class loads an OSDI compiled model and associated modelcard parameters.
+    It provides the foundation for creating device instances with specific geometry
+    and operating conditions.
+
+    Temperature handling:
+        - The Model class itself does not store temperature
+        - Temperature is specified when creating Instance objects
+        - Temperature must be in KELVIN (see module docstring for conversion)
+
+    Example:
+        >>> model = Model(
+        ...     "bsimcmg.osdi",
+        ...     "asap7.pm",
+        ...     "nmos_rvt"
+        ... )
+    """
+
     def __init__(self, osdi_path: str, modelcard_path: str, model_name: str,
                  model_card_name: Optional[str] = None) -> None:
         self._lib = OsdiLibrary(osdi_path)
@@ -1241,6 +1286,37 @@ class Model:
 
 
 class Instance:
+    """
+    BSIM-CMG device instance for DC and transient evaluation.
+
+    An Instance represents a specific device with geometry parameters and
+    operating conditions (temperature, voltages). It provides methods for
+    DC operating point analysis and transient simulation.
+
+    Temperature parameter:
+        - The temperature parameter MUST be in KELVIN
+        - Default is 300.15 K (27°C, typical room temperature)
+        - To convert from Celsius: temp_K = temp_C + 273.15
+
+    Args:
+        model: Model object containing OSDI descriptor and modelcard
+        params: Instance-specific parameters (L, TFIN, NFIN, etc.)
+        temperature: Operating temperature in KELVIN (default: 300.15 K = 27°C)
+
+    Example:
+        >>> # Create instance at room temperature (27°C)
+        >>> inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2},
+        ...                 temperature=300.15)  # 27°C in Kelvin
+
+        >>> # Create instance at elevated temperature (85°C)
+        >>> inst = Instance(model, params={"L": 16e-9},
+        ...                 temperature=358.15)  # 85°C = 85 + 273.15
+
+        >>> # Create instance at cold temperature (-40°C)
+        >>> inst = Instance(model, params={"L": 16e-9},
+        ...                 temperature=233.15)  # -40°C = -40 + 273.15
+    """
+
     def __init__(self, model: Model, params: Optional[Dict[str, float]] = None,
                  temperature: float = 300.15) -> None:
         self._model = model
@@ -1423,6 +1499,34 @@ class Instance:
         return caps
 
     def eval_dc(self, nodes: Dict[str, float]) -> Dict[str, float]:
+        """
+        Perform DC operating point analysis.
+
+        Evaluates the device at specified terminal voltages and returns
+        terminal currents, charges, derivatives, and capacitances.
+
+        Temperature:
+            Uses the temperature specified during Instance initialization (in KELVIN).
+            To change temperature, create a new Instance with the desired temperature.
+
+        Args:
+            nodes: Dictionary mapping terminal names to voltages
+                   Required keys: "d" (drain), "g" (gate), "s" (source), "e" (bulk)
+                   Example: {"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0}
+
+        Returns:
+            Dictionary with 18 output values:
+            - Currents (A): id, ig, is, ie, ids
+            - Charges (C): qg, qd, qs, qb
+            - Derivatives (S): gm, gds, gmb
+            - Capacitances (F): cgg, cgd, cgs, cdg, cdd
+
+        Example:
+            >>> inst = Instance(model, params={"L": 16e-9}, temperature=300.15)  # 27°C
+            >>> result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+            >>> print(f"Drain current: {result['id']:.6e} A")
+            >>> print(f"Transconductance: {result['gm']:.6e} S")
+        """
         self._set_node_voltages(nodes, True)
         self._inst.solve_internal_nodes(self._model.model, self._sim, 200, 1e-9)
         flags = (ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
@@ -1463,6 +1567,39 @@ class Instance:
 
     def eval_tran(self, nodes: Dict[str, float], time: float, delta_t: float,
                   prev_state: Optional[List[float]] = None) -> Dict[str, float]:
+        """
+        Perform transient analysis at a specific time point.
+
+        Evaluates the device with time-dependent effects including charge storage
+        and capacitive currents. Suitable for transient simulation and AC analysis.
+
+        Temperature:
+            Uses the temperature specified during Instance initialization (in KELVIN).
+            Temperature effects on capacitances and charges are evaluated at
+            the initialization temperature.
+
+        Args:
+            nodes: Dictionary mapping terminal names to voltages
+                   Required keys: "d" (drain), "g" (gate), "s" (source), "e" (bulk)
+                   Example: {"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0}
+            time: Current simulation time in seconds
+            delta_t: Time step in seconds (must be positive)
+            prev_state: Optional previous state vector for multi-step simulations
+
+        Returns:
+            Dictionary with 9 output values:
+            - Currents (A): id, ig, is, ie, ids (includes displacement currents)
+            - Charges (C): qg, qd, qs, qb
+
+        Example:
+            >>> inst = Instance(model, params={"L": 16e-9}, temperature=358.15)  # 85°C
+            >>> result = inst.eval_tran(
+            ...     nodes={"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0},
+            ...     time=1e-9,
+            ...     delta_t=1e-12
+            ... )
+            >>> print(f"Drain current (with dQ/dt): {result['id']:.6e} A")
+        """
         if delta_t <= 0.0:
             raise RuntimeError("delta_t must be positive")
         if prev_state is not None:
