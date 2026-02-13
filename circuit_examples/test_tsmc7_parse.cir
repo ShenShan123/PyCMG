@@ -1,7 +1,7 @@
 * Test NGSPICE parsing of cleaned TSMC7 modelcard
 * Don't load OSDI, just test modelcard parsing
 
-.lib /home/shenshan/pycmg-wrapper/.worktrees/more-techs/tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean.l Total_svt
+.lib ../tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean.l Total_svt
 
 * Simple test
 .op

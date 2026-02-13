@@ -1,6 +1,6 @@
 * Test NGSPICE with cleaned TSMC7 modelcard
-.include /home/shenshan/pycmg-wrapper/.worktrees/more-techs/build-deep-verify/osdi/bsimcmg.osdi
-.lib /home/shenshan/pycmg-wrapper/.worktrees/more-techs/tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean.l Total_svt
+.include ../build-deep-verify/osdi/bsimcmg.osdi
+.lib ../tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean.l Total_svt
 
 * Simple test circuit
 * NMOS transistor

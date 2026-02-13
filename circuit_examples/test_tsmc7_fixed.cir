@@ -1,7 +1,7 @@
 * Test TSMC7 fixed modelcard with NGSPICE
 * Test a simple subcircuit instantiation
 
-.include "tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean_fixed.l"
+.include "../tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2_clean_fixed.l"
 
 * Test npode_svt_mac subcircuit (one of the fixed ones)
 * .subckt npode_svt_mac n1 n2 n3 l=length w=1e-10 nfin=0.01
