@@ -457,6 +457,15 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
                 if target_lower is None or _to_lower(model_name) == target_lower:
                     params = _parse_params(block_lines)
                     if _is_valid_model(model_type, params):
+                        # Inject DEVTYPE parameter for ASAP7 compatibility
+                        # BSIM-CMG v107 uses DEVTYPE to distinguish NMOS (1) vs PMOS (0)
+                        # ASAP7 modelcards often omit this, causing PMOS to behave incorrectly
+                        model_type_lower = _to_lower(model_type)
+                        if "devtype" not in params:
+                            if model_type_lower == "pmos":
+                                params["devtype"] = 0.0  # PMOS
+                            elif model_type_lower == "nmos":
+                                params["devtype"] = 1.0  # NMOS
                         return ParsedModel(name=model_name, params=params)
             continue
         idx += 1
@@ -692,6 +701,15 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
                             parsed = 1.1e-10
 
                         params[key_lower] = parsed
+
+                # Inject DEVTYPE if not present (ASAP7 compatibility)
+                # TSMC7 typically has this, but provides safety net
+                if "devtype" not in params:
+                    expected_type_lower = _to_lower(expected_type)
+                    if expected_type_lower == "pmos":
+                        params["devtype"] = 0.0  # PMOS
+                    elif expected_type_lower == "nmos":
+                        params["devtype"] = 1.0  # NMOS
 
                 return params
 

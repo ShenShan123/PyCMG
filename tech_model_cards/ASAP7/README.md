@@ -125,14 +125,17 @@ ngspice -b test_asap7.cir
 
 ### Verification Status
 
-**PMOS KNOWN ISSUE**: ASAP7 PMOS models exhibit inverted behavior (conduct at positive Vg instead of negative Vg) due to missing or incorrect `DEVTYPE` parameter. The BSIM-CMG v107 uses different parameter conventions than v106.1 (TSMC7). Investigation ongoing to identify correct device type parameter for ASAP7 PMOS models.
+**PMOS DEVTYPE ISSUE RESOLVED (2026-02-13)**: ASAP7 PMOS models previously exhibited inverted behavior due to missing `devtype` parameter. This is now automatically fixed in PyCMG's `parse_modelcard()` function which injects:
+- `devtype = 1.0` for NMOS models
+- `devtype = 0.0` for PMOS models
 
-**Current Workaround**: Use TSMC7 PMOS models for PMOS testing. NMOS models verified and working correctly.
+The original ASAP7 modelcard files remain unmodified. The `7nm_TT_160803_with_devtype.pm` file is kept for reference but is no longer needed.
 
 - ✅ All 8 NMOS models complete with ~250 parameters each
-- ⚠️ PMOS models: DEVTYPE parameter issue causing inverted behavior
+- ✅ All 8 PMOS models complete with ~250 parameters each
+- ✅ PMOS models now work correctly with auto-injected devtype
 - ✅ DC, AC (capacitance), and noise sections present in all models
-- ✅ NMOS verified against NGSPICE with binary-level consistency
+- ✅ Both NMOS and PMOS verified against NGSPICE with binary-level consistency
 - ✅ Tolerances: ABS_TOL_I=1e-9, REL_TOL=5e-3
 
 ## References
