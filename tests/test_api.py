@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 import pycmg
@@ -325,6 +326,29 @@ def test_temperature_sweep() -> None:
             result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
             assert "id" in result
             assert isinstance(result["id"], float)
+    finally:
+        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
+            Path(modelcard_path).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def test_get_jacobian_matrix():
+    """Test that Instance exposes condensed 4x4 Jacobian matrix."""
+    modelcard_path, model_name = _get_test_modelcard()
+    try:
+        model = Model(str(OSDI_PATH), modelcard_path, model_name)
+        inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
+
+        J = inst.get_jacobian_matrix({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+
+        # Condensed to 4 external terminals: d, g, s, e
+        assert J.shape == (4, 4), f"Expected (4,4), got {J.shape}"
+        assert isinstance(J, np.ndarray)
+        assert np.all(np.isfinite(J)), f"Non-finite entries in Jacobian: {J}"
+
+        # gds = dId/dVd should be positive in saturation
+        # (terminal ordering from sim.terminal_indices)
+        assert J.sum() != 0.0, "Jacobian is all zeros"
     finally:
         if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
             Path(modelcard_path).unlink(missing_ok=True)

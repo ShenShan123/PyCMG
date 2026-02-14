@@ -1534,6 +1534,69 @@ class Instance:
             caps["cdd"] = float(c_condensed[d, d])
         return caps
 
+    def get_jacobian_matrix(self, nodes: Dict[str, float]) -> np.ndarray:
+        """Extract the condensed 4x4 resistive Jacobian matrix.
+
+        BSIM-CMG has internal nodes (di, si, etc.) making the raw Jacobian
+        7x7 or larger. This method condenses it to the 4 external terminals
+        using Schur complement elimination:
+
+            G_ext = G_ee - G_ei * G_ii^-1 * G_ie
+
+        This is the matrix a circuit simulator's Newton-Raphson solver sees.
+
+        Returns a 4x4 numpy array where:
+        - Rows/cols correspond to terminal order in sim.terminal_indices
+          (typically d, g, s, e)
+        - G[i,j] = dI_i / dV_j (conductance, Siemens)
+
+        Args:
+            nodes: Dict with keys 'd', 'g', 's', 'e' and voltage values
+
+        Returns:
+            4x4 condensed Jacobian matrix as numpy array
+        """
+        # Run DC evaluation to populate OSDI Jacobian buffers
+        self.eval_dc(nodes)
+
+        # Build full N×N resistive Jacobian from OSDI
+        g_full = self._build_full_jacobian(self._sim, self._sim.jacobian_resist)
+
+        # Condense to external-only using Schur complement
+        # (same math as _condense_capacitance but real-valued)
+        ext = self._sim.terminal_indices
+        intn = self._sim.internal_indices
+        ne = len(ext)
+        ni = len(intn)
+
+        g_ee = np.zeros((ne, ne))
+        for r in range(ne):
+            for c in range(ne):
+                g_ee[r, c] = g_full[ext[r], ext[c]]
+
+        if ni == 0:
+            return g_ee
+
+        g_ei = np.zeros((ne, ni))
+        g_ie = np.zeros((ni, ne))
+        g_ii = np.zeros((ni, ni))
+
+        for r in range(ne):
+            for c in range(ni):
+                g_ei[r, c] = g_full[ext[r], intn[c]]
+        for r in range(ni):
+            for c in range(ne):
+                g_ie[r, c] = g_full[intn[r], ext[c]]
+            for c in range(ni):
+                g_ii[r, c] = g_full[intn[r], intn[c]]
+
+        try:
+            g_ie_sol = np.linalg.solve(g_ii, g_ie)
+        except np.linalg.LinAlgError:
+            return g_ee  # Fallback: no condensation
+
+        return g_ee - g_ei @ g_ie_sol
+
     def eval_dc(self, nodes: Dict[str, float]) -> Dict[str, float]:
         """
         Perform DC operating point analysis.
