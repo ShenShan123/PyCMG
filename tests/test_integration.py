@@ -38,7 +38,7 @@ OSDI_PATH = ROOT / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
 BUILD = ROOT / "build-deep-verify"
 
 # ASAP7 modelcard configuration
-ASAP7_DIR = ROOT / "tech_model_cards" / "asap7_pdk_r1p7" / "models" / "hspice"
+ASAP7_DIR = ROOT / "tech_model_cards" / "ASAP7"
 ASAP7_MODELCARD_OVERRIDE = os.environ.get("ASAP7_MODELCARD")
 
 NGSPICE_BIN = os.environ.get("NGSPICE_BIN",

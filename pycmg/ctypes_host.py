@@ -1287,7 +1287,13 @@ class Model:
         self._model = OsdiModel(desc)
         self._modelcard_params: Dict[str, float] = {}
         if modelcard_path:
-            parsed = parse_modelcard(modelcard_path, model_card_name)
+            # Use model_card_name if explicitly provided, otherwise fall back to
+            # model_name so parse_modelcard targets the correct .model block.
+            # Without this, parse_modelcard(target=None) matches the FIRST model
+            # in the file — which is NMOS in multi-model files like ASAP7,
+            # causing PMOS models to get DEVTYPE=1 (NMOS) instead of DEVTYPE=0.
+            target = model_card_name if model_card_name else model_name
+            parsed = parse_modelcard(modelcard_path, target)
             self._modelcard_params = dict(parsed.params)
 
     @property
