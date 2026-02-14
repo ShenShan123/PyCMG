@@ -342,7 +342,12 @@ def parse_ngspice_raw(raw_path: Path) -> Dict[str, np.ndarray]:
         raise RuntimeError(f"Could not parse NGSPICE raw file: {raw_path}")
 
     # Parse values — collect into list of rows, then convert to numpy
-    # Format: index_number\n val1\n val2\n ... valN\n (repeated per point)
+    # NGSPICE raw format per data point:
+    #   " <index>\t<first_value>"   ← first line has integer index + tab + value
+    #   "\t<value_2>"              ← subsequent values one per line, tab-indented
+    #   "\t<value_3>"
+    #   ...
+    # The integer index is NOT a data variable and must be skipped.
     n_vars = len(headers)
     all_rows: List[List[float]] = []
     current_row: List[float] = []
@@ -351,18 +356,29 @@ def parse_ngspice_raw(raw_path: Path) -> Dict[str, np.ndarray]:
         stripped = line.strip()
         if not stripped:
             continue
-        # Each value is on its own line; first value of each point
-        # is preceded by the point index (e.g., "0\t1.23456e-01")
-        parts = stripped.split()
-        for p in parts:
+        # Detect "index\tvalue" lines: they start with an integer followed by tab
+        parts = stripped.split('\t')
+        if len(parts) == 2:
+            # Could be "<int_index>\t<float_value>" — skip the index
             try:
-                val = float(p)
+                int(parts[0])          # Verify first part is integer index
+                val = float(parts[1])  # Take only the float value
                 current_row.append(val)
                 if len(current_row) == n_vars:
                     all_rows.append(current_row)
                     current_row = []
-            except ValueError:
+                continue
+            except (ValueError, IndexError):
                 pass
+        # Regular line: just a single float value (tab-indented)
+        try:
+            val = float(stripped)
+            current_row.append(val)
+            if len(current_row) == n_vars:
+                all_rows.append(current_row)
+                current_row = []
+        except ValueError:
+            pass
 
     if not all_rows:
         raise RuntimeError(f"No data points parsed from {raw_path}")

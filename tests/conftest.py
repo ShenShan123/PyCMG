@@ -37,8 +37,8 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "pmos_file": "7nm_TT_160803.pm",
         "nmos_model": "nmos_rvt",
         "pmos_model": "pmos_rvt",
-        "nmos_params": {"L": 7e-9, "TFIN": 6.5e-9, "NFIN": 1.0},
-        "pmos_params": {"L": 7e-9, "TFIN": 6.5e-9, "NFIN": 1.0},
+        "nmos_params": {"L": 7e-9, "TFIN": 6.5e-9, "NFIN": 1.0, "DEVTYPE": 1},
+        "pmos_params": {"L": 7e-9, "TFIN": 6.5e-9, "NFIN": 1.0, "DEVTYPE": 0},
     },
     "TSMC5": {
         "dir": "TSMC5/naive",
@@ -47,8 +47,8 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "pmos_file": "pch_lvt_mac_l20nm.l",
         "nmos_model": "nch_svt_mac",
         "pmos_model": "pch_lvt_mac",
-        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0},
-        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0},
+        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 1},
+        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 0},
     },
     "TSMC7": {
         "dir": "TSMC7/naive",
@@ -57,8 +57,8 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "pmos_file": "pch_lvt_mac_l20nm.l",
         "nmos_model": "nch_svt_mac",
         "pmos_model": "pch_lvt_mac",
-        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0},
-        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0},
+        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 1},
+        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 0},
     },
     "TSMC12": {
         "dir": "TSMC12/naive",
@@ -67,8 +67,8 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "pmos_file": "pch_lvt_mac_l20nm.l",
         "nmos_model": "nch_svt_mac",
         "pmos_model": "pch_lvt_mac",
-        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0},
-        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0},
+        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 1},
+        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 0},
     },
     "TSMC16": {
         "dir": "TSMC16/naive",
@@ -77,8 +77,8 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "pmos_file": "pch_lvt_mac_l20nm.l",
         "nmos_model": "nch_svt_mac",
         "pmos_model": "pch_lvt_mac",
-        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0},
-        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0},
+        "nmos_params": {"L": 16e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 1},
+        "pmos_params": {"L": 20e-9, "TFIN": 6e-9, "NFIN": 2.0, "DEVTYPE": 0},
     },
 }
 

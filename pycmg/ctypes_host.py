@@ -1414,9 +1414,15 @@ class Instance:
         return -residuals[idx]
 
     def _read_terminal_current(self, term: str, internal: str) -> float:
+        """Read terminal current from internal node residual.
+
+        OSDI residual_resist stores KCL residuals (current INTO node).
+        Terminal current convention: I = -F (current OUT of device terminal).
+        Must negate, same as _read_current() / _read_current_from().
+        """
         idx_internal = self._sim.node_index.get(internal)
         if idx_internal is not None and idx_internal < len(self._sim.residual_resist):
-            return float(self._sim.residual_resist[idx_internal])
+            return -float(self._sim.residual_resist[idx_internal])
         return self._read_current(term)
 
     def _read_opvar(self, name: str, alias: str) -> Optional[float]:
@@ -1593,9 +1599,12 @@ class Instance:
         try:
             g_ie_sol = np.linalg.solve(g_ii, g_ie)
         except np.linalg.LinAlgError:
-            return g_ee  # Fallback: no condensation
+            # Fallback: no condensation; negate for terminal current convention
+            return -g_ee
 
-        return g_ee - g_ei @ g_ie_sol
+        # Negate: OSDI jacobian_resist stores dF/dV where F is KCL residual
+        # (current into node). Terminal currents use I = -F, so dI/dV = -dF/dV.
+        return -(g_ee - g_ei @ g_ie_sol)
 
     def eval_dc(self, nodes: Dict[str, float]) -> Dict[str, float]:
         """
