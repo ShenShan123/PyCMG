@@ -41,9 +41,12 @@ pycmg-wrapper/
 │   ├── conftest.py          # Pytest fixtures
 │   ├── test_api.py          # Public API tests (smoke, basic functionality)
 │   ├── test_asap7.py        # ASAP7 verification (optimized PVT corners)
-│   └── test_integration.py  # NGSPICE comparison tests (representative subset)
+│   ├── test_integration.py  # NGSPICE comparison tests (representative subset)
+│   └── test_tsmc7.py        # TSMC7 verification (naive modelcards)
 ├── tech_model_cards/         # Technology model cards
-│   └── asap7_pdk_r1p7/      # ASAP7 PDK model files
+│   ├── asap7_pdk_r1p7/      # ASAP7 PDK model files
+│   └── TSMC7/               # TSMC7 model files
+│       └── naive/           # Pre-baked naive modelcards for NGSPICE
 ├── build-deep-verify/        # Build artifacts (generated)
 │   ├── osdi/                # Compiled .osdi files
 │   └── ngspice_eval/        # Verification outputs
@@ -190,6 +193,10 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
       * TT (typical), SS (slow), FF (fast) corners
       * Representative temperatures: -40°C, 27°C, 85°C, 125°C
       * DC, AC (capacitance), and TRAN verification
+    * **TSMC7 tests** (`tests/test_tsmc7.py`): TSMC7 naive modelcard verification
+      * NMOS SVT and PMOS LVT operating points
+      * Temperature and voltage sweeps
+      * Uses modelcard baking for NGSPICE compatibility
     * **Integration tests** (`tests/test_integration.py`): NGSPICE comparison
       * Limited voltage sweep points (not exhaustive)
       * Focus on critical operating regions
@@ -222,13 +229,26 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ## Lessons from Bugs (Keep Coming)
 
+### Multi-Technology Verification & NGSPICE OSDI Limitations (2026-02-14)
+
+- **NGSPICE OSDI does NOT support instance-line parameters**: Unlike HSPICE or Spectre, NGSPICE's OSDI interface cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters (L, TFIN, NFIN) must be **baked into the `.model` block** in the modelcard file.
+
+- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `test_tsmc7.py` inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
+
+- **PMOS DEVTYPE in multi-model files**: When a modelcard contains multiple `.model` blocks (e.g., NMOS + PMOS in one file), `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed. Otherwise PMOS inherits DEVTYPE=1 from the first (NMOS) model, causing inverted behavior.
+
+- **TSMC7 PMOS L=16nm NGSPICE convergence failure**: At L=16nm, TSMC7 PMOS naive modelcards have binning parameters that produce invalid `PDIBL2_i=-0.118`, causing NGSPICE "Timestep too small" DC convergence failure. PyCMG single-shot evaluation doesn't fail (no iterative solver), making comparison impossible. **Workaround**: Use L=20nm or larger for PMOS verification.
+
+- **Stale test files with `sys.exit(1)`**: Module-level `sys.exit(1)` calls in test files crash pytest collection for the entire `tests/` directory. Clean up stale/scratch test files before running `pytest tests/`.
+
+- **TSMC7 naive modelcards**: Use `nch_svt_mac_l16nm.l` (NMOS) and `pch_lvt_mac_l20nm.l` (PMOS). These contain pre-baked geometric params but require additional instance-param injection for NGSPICE compatibility.
+
 ### ASAP7 Deep Dive Analysis (2026-02-13 Round 3)
 - **Critical parameter storage bug**: Both `parse_modelcard()` and `_extract_model_params()` stored parameters with original case (e.g., "EOT", "L", "NFIN") instead of lowercase. This caused parameter lookup failures when the code tried to access them using lowercase comparisons. Fixed by storing all parameters as lowercase: `parsed_params[_to_lower(key)] = parsed`.
 - **nfin default value bug**: The `nfin` default value (1.0) was set but never stored back to `parsed_params` because the code had a double-assignment pattern that left the last conditional branch without a storage statement. Fixed by using a single assignment at the end after all conditionals.
 - **ASAP7 path configuration**: Test file had hardcoded path `asap7_pdk_r1p7/models/hspice` but actual directory is `ASAP7`. Fixed by updating path.
 - **ASAP7 PMOS DEVTYPE issue RESOLVED**: PMOS models exhibited inverted behavior (conducted at positive Vg) due to missing `devtype` parameter. Standard ASAP7 files omit this parameter. Fixed by auto-injecting `devtype=0.0` for PMOS and `devtype=1.0` for NMOS in `parse_modelcard()` and `_extract_model_params()`. Original modelcard files remain unmodified.
 - **Test infrastructure gap**: ASAP7 tests only verify NMOS devices; PMOS verification tests can now be added since DEVTYPE issue is resolved.
-*Test infrastructure gap.*ASAP7 tests only verify NMOS devices.*PMOS verification tests can now be added since DEVTYPE issue is resolved.
 
 ### ASAP7 PMOS DEVTYPE Auto-Injection (2026-02-13 Round 4)
 
@@ -288,6 +308,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - ✅ Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
 - ✅ Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
 - ✅ ASAP7 verification: `tests/test_asap7.py` runs DC/AC/TRAN across PVT corners.
+- ✅ TSMC7 verification: `tests/test_tsmc7.py` runs NMOS/PMOS with naive modelcards.
 - ✅ Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - ⚠️ PyBind11 layer: `cpp/pycmg_bindings.cpp` exists but ctypes implementation is currently used.
 
@@ -301,28 +322,23 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - **Result**: PyCMG and NGSPICE produce binary-identical results within specified tolerances
 
 ### TSMC7 (Taiwan Semiconductor 7nm)
-- **Status**: ✅ Verified (2026-02-10)
-- **Test File**: `tests/test_tsmc7_verification.py`
-- **Modelcard**: `tech_model_cards/TSMC7/tsmc7_simple.l`
-- **Coverage**: Parameter sweeps across L (gate length), TFIN (fin thickness), NFIN (fin count)
-- **Test Results**:
+- **Status**: ✅ Verified (2026-02-14)
+- **Test File**: `tests/test_tsmc7.py`
+- **Modelcards**: `tech_model_cards/TSMC7/naive/` directory
+  - NMOS: `nch_svt_mac_l16nm.l` (L=16nm, TFIN=6nm, NFIN=2)
+  - PMOS: `pch_lvt_mac_l20nm.l` (L=20nm to avoid NGSPICE convergence failure)
+- **Coverage**: 4 tests covering NMOS SVT, PMOS LVT, temperature sweep, voltage sweep
+- **Test Results**: All 4 tests pass
 
-| Parameter Sweep | Points Tested | Result |
-|-----------------|--------------|--------|
-| **Length (L)** | 12nm, 16nm, 20nm, 24nm | ✅ All passed |
-| **Fin Thickness (TFIN)** | 6nm, 7nm, 8nm | ✅ All passed |
-| **Fin Count (NFIN)** | 1, 2, 4 | ✅ All passed |
+| Test | Description | Result |
+|------|-------------|--------|
+| `test_tsmc7_nmos_svt_op` | NMOS operating point at L=16nm | ✅ Pass |
+| `test_tsmc7_pmos_lvt_op` | PMOS operating point at L=20nm | ✅ Pass |
+| `test_tsmc7_temperature_sweep` | -40°C to 125°C | ✅ Pass |
+| `test_tsmc7_voltage_sweep` | Vg sweep 0V to 0.8V | ✅ Pass |
 
-**Total TSMC7 Tests**: 10 individual test cases, all passing
-
-**Key Findings**:
-- **Parameter Handling**: BSIM-CMG uses `L` (uppercase) as instance parameter in PyCMG, but `l` (lowercase) as modelcard parameter in NGSPICE
-- **Effective Length**: `Leff = L - xl` where `xl` is length offset (TSMC7: xl=1e-8, ASAP7: xl=1e-9)
-- **Modelcard Baking**: For NGSPICE verification, instance parameters must be baked into modelcard using lowercase names (`l`, `tfin`, `nfin`)
-- **Binary Consistency**: Both PyCMG and NGSPICE use the identical `bsimcmg.osdi` file, ensuring binary-level verification
-
-**Verification Notes**:
-- Test configuration: Vd=0.75V, Vg=0.75V, Vs=0V, Ve=0V, T=27°C
-- Tolerances: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, REL_TOL=5e-3
-- All 13 outputs verified per test case (id, ig, is, ie, ids, qg, qd, qs, qb, gm, gds, gmb)
-- Typical drain current at 16nm/8nm/2fins: ~167µA in saturation region
+**Key Implementation Details**:
+- **Modelcard baking**: `_bake_inst_params_into_modelcard()` injects instance params (L, TFIN, NFIN) before the closing `)` of the `.model` block
+- **NGSPICE OSDI limitation**: Cannot accept instance params on device line; must be in `.model` block
+- **PMOS L=16nm caveat**: Invalid `PDIBL2_i=-0.118` from binning causes NGSPICE convergence failure; use L≥20nm
+- **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, REL_TOL=5e-3
