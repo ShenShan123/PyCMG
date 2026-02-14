@@ -228,6 +228,26 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - **ASAP7 path configuration**: Test file had hardcoded path `asap7_pdk_r1p7/models/hspice` but actual directory is `ASAP7`. Fixed by updating path.
 - **ASAP7 PMOS DEVTYPE issue RESOLVED**: PMOS models exhibited inverted behavior (conducted at positive Vg) due to missing `devtype` parameter. Standard ASAP7 files omit this parameter. Fixed by auto-injecting `devtype=0.0` for PMOS and `devtype=1.0` for NMOS in `parse_modelcard()` and `_extract_model_params()`. Original modelcard files remain unmodified.
 - **Test infrastructure gap**: ASAP7 tests only verify NMOS devices; PMOS verification tests can now be added since DEVTYPE issue is resolved.
+*Test infrastructure gap.*ASAP7 tests only verify NMOS devices.*PMOS verification tests can now be added since DEVTYPE issue is resolved.
+
+### ASAP7 PMOS DEVTYPE Auto-Injection (2026-02-13 Round 4)
+
+- **DEVTYPE auto-injection**: BSIM-CMG v107 uses integer parameter `DEVTYPE = 1` for NMOS (ntype) and `DEVTYPE = 0` for PMOS (ptype) to distinguish device types. Standard ASAP7 modelcards omit this parameter, causing PMOS models to conduct at positive Vg instead of negative Vg (inverted behavior).
+
+- **Solution**: Implemented automatic DEVTYPE injection in both `parse_modelcard()` and `_extract_model_params()` functions:
+
+  - Detects if `devtype` is missing from parsed parameters
+
+  - For PMOS models: injects `devtype = 0.0`
+
+  - For NMOS models: injects `devtype = 1.0`
+
+- **Implementation**: Applied to both ASAP7 and TSMC7 parsing functions for consistency
+
+- **Result**: Original ASAP7 modelcard files remain unmodified; PMOS models now work correctly without manual workarounds
+
+- **Verification**: All 16 API and ASAP7 tests pass; DEVTYPE injection verified via Python test
+
 
 ### Modelcard Parsing & Parameter Handling (2026-02-13 Round 1)
 - **Double assignment bug in `_parse_params()`**: The original code had `parsed_params[key] = parsed` followed by conditional blocks that modified `parsed` without storing back. This caused `nfin` defaults to never be applied. Fixed by using `if-elif-elif` chain with single assignment at end.
