@@ -126,8 +126,15 @@ ngspice -b test_asap7.cir
 ### Verification Status
 
 **PMOS DEVTYPE ISSUE RESOLVED (2026-02-13)**: ASAP7 PMOS models previously exhibited inverted behavior due to missing `devtype` parameter. This is now automatically fixed in PyCMG's `parse_modelcard()` function which injects:
-- `devtype = 1.0` for NMOS models
-- `devtype = 0.0` for PMOS models
+- `devtype = 1.0` for NMOS models (ntype)
+- `devtype = 0.0` for PMOS models (ptype)
+
+**Technical Details:**
+- BSIM-CMG v107 uses integer parameter `DEVTYPE` to distinguish device types
+- Standard ASAP7 modelcards omit this parameter
+- PyCMG automatically detects model type from `.model` line (nmos/pmos keyword)
+- DEVTYPE is injected during parsing if not already present
+- Implementation: `pycmg/ctypes_host.py` in both `parse_modelcard()` and `_extract_model_params()`
 
 The original ASAP7 modelcard files remain unmodified. The `7nm_TT_160803_with_devtype.pm` file is kept for reference but is no longer needed.
 
