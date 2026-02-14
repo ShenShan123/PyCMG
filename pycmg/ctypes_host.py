@@ -474,17 +474,18 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
     raise RuntimeError(f"no {expected} model found in modelcard: {path}")
 
 
-def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
+def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
     """
-    Extract and merge model parameters from full TSMC7 PDK.
+    Extract and merge model parameters from full TSMC PDK.
 
-    The TSMC7 PDK has a sophisticated structure with:
+    This function works with all TSMC FinFET PDKs (TSMC5, TSMC7, TSMC12, TSMC16)
+    which share the same structure:
     - .global model: base parameters for all variants
-    - .1 through .30 variants: length-binned models with lmin/lmax
+    - .1 through .N variants: length-binned models with lmin/lmax
     - Subcircuit wrappers: not needed for OSDI (we use model directly)
 
     Args:
-        path: Path to TSMC7 PDK file (e.g., cln7_1d8_sp_v1d2_2p2.l)
+        path: Path to TSMC PDK file (e.g., cln7_1d8_sp_v1d2_2p2.l)
         model_type: "nch" for NMOS, "pch" for PMOS
         device_type: Device type - "svt_mac", "lvt_mac", "ulvt_mac", "18_mac", etc.
         L: Gate length in meters (used for automatic variant selection)
@@ -493,8 +494,10 @@ def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> P
         ParsedModel with merged global + variant parameters
 
     Example:
-        >>> parse_tsmc7_pdk("cln7_1d8_sp_v1d2_2p2.l", "nch", "svt_mac", 16e-9)
+        >>> parse_tsmc_pdk("cln7_1d8_sp_v1d2_2p2.l", "nch", "svt_mac", 16e-9)
         ParsedModel(name="nch_svt_mac", params={...merged params...})
+        >>> parse_tsmc_pdk("cln5_1d2_sp_v1d2_2p2.l", "pch", "lvt_mac", 20e-9)
+        ParsedModel(name="pch_lvt_mac", params={...merged params...})
     """
     base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
     expected_type = "nmos" if model_type == "nch" else "pmos"
@@ -526,30 +529,38 @@ def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> P
     return ParsedModel(name=base_name, params=merged_params)
 
 
+# Backward-compatible alias for parse_tsmc_pdk
+def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
+    """
+    Backward-compatible alias for parse_tsmc_pdk.
+
+    See parse_tsmc_pdk for full documentation.
+    """
+    return parse_tsmc_pdk(path, model_type, device_type, L)
+
+
 def _find_length_variant(path: str, base_name: str, L: float) -> int:
     """
     Find which length variant matches L value.
 
-    TSMC7 has 30 bins (numbered .1 through .30) with lmin/lmax ranges.
-    The bins are in descending order by length:
-    - .1:  lmin=1.2e-07  lmax=2.4001e-07 (240nm)
-    - .2:  lmin=7.2e-08  lmax=1.2e-07   (120nm)
-    - .3:  lmin=3.6e-08  lmax=7.2e-08   (72nm)
-    - ...
-    - .30: lmin=8e-09    lmax=1.1e-08   (11nm)
+    All TSMC FinFET PDKs (TSMC5, TSMC7, TSMC12, TSMC16) use numbered bins
+    with lmin/lmax ranges. The number of bins varies by technology:
+    - TSMC5, TSMC12: 5 bins per corner
+    - TSMC7: 30 bins
+    - TSMC16: 25 bins per corner
 
     Supported variant suffixes:
-    - Numeric (.1, .2, ..., .30): Length-binned models with lmin/lmax
-    - .global: Base parameters (handled separately in parse_tsmc7_pdk)
+    - Numeric (.1, .2, ...): Length-binned models with lmin/lmax
+    - .global: Base parameters (handled separately in parse_tsmc_pdk)
     - Other non-numeric suffixes: Logged as warnings and skipped
 
     Args:
-        path: Path to TSMC7 PDK file
+        path: Path to TSMC PDK file
         base_name: Base model name (e.g., "nch_svt_mac")
         L: Gate length in meters
 
     Returns:
-        Variant number (1-30)
+        Variant number (integer)
 
     Raises:
         RuntimeError: If no variant matches the L value
@@ -632,13 +643,14 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
 
 def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dict[str, float]:
     """
-    Extract parameters from a single .model block in TSMC7 PDK.
+    Extract parameters from a single .model block in TSMC PDK.
 
+    Works with all TSMC FinFET PDKs (TSMC5, TSMC7, TSMC12, TSMC16).
     Reads from the model name match to the next non-continuation line.
     Parses all key=value pairs with SPICE number suffix support.
 
     Args:
-        path: Path to TSMC7 PDK file
+        path: Path to TSMC PDK file
         model_name: Full model name including suffix (e.g., "nch_svt_mac.global" or "nch_svt_mac.4")
         expected_type: Expected model type ("nmos" or "pmos")
 
@@ -654,7 +666,7 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
         lines = fh.readlines()
 
     # Build the exact pattern to match
-    # TSMC7 uses format: .model nch_svt_mac.global nmos (
+    # TSMC PDKs use format: .model nch_svt_mac.global nmos (
     target_pattern = f".model {model_name} {expected_type}"
 
     idx = 0
