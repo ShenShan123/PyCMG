@@ -3,3 +3,5 @@ build-pycmg*/
 pycmg/*.so
 build-deep-verify/
 __pycache__/
+tech_model_cards/TSMC*/
+tech_model_cards/TSMC*/*.l

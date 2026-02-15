@@ -50,7 +50,7 @@ pycmg-wrapper/
 │   ├── generate_naive_tsmc7.py  # TSMC7-specific naive modelcard generator
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── tech_model_cards/         # Technology model cards
-│   ├── asap7_pdk_r1p7/      # ASAP7 PDK model files
+│   ├── ASAP7/               # ASAP7 PDK model files
 │   ├── TSMC5/               # TSMC5 model files
 │   │   └── naive/           # Pre-baked naive modelcards
 │   ├── TSMC7/               # TSMC7 model files

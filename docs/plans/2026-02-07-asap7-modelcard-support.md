@@ -146,7 +146,7 @@ from pycmg import ctypes_host
 
 
 def main() -> None:
-    modelcard = Path("/home/shenshan/pycmg-wrapper/tech_model_cards/asap7_pdk_r1p7/models/hspice/7nm_TT_160803.pm")
+    modelcard = Path("/home/shenshan/pycmg-wrapper/tech_model_cards/ASAP7/7nm_TT_160803.pm")
     model_name = "nmos_lvt"
     parsed = ctypes_host.parse_modelcard(str(modelcard), target_model_name=model_name)
     print(f"model={parsed.name}")

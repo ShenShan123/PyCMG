@@ -64,7 +64,7 @@ Move the core logic from `scripts/deep_verify.py` into `tests/verify_utils.py`:
 
 Add modelcard-path support:
 - All APIs accept a `modelcard` path explicitly.
-- Add helper to iterate `tech_model_cards/asap7_pdk_r1p7/models/hspice/*.pm`.
+- Add helper to iterate `tech_model_cards/ASAP7/*.pm`.
 
 **Step 3: Update tests to call the new utilities**
 
@@ -123,7 +123,7 @@ git commit -m "refactor: move robustness helpers into tests"
 **Step 1: Write failing test**
 
 Create `tests/test_asap7_full_verify.py` that:
-- Enumerates `tech_model_cards/asap7_pdk_r1p7/models/hspice/*.pm`.
+- Enumerates `tech_model_cards/ASAP7/*.pm`.
 - For each modelcard, runs DC/AC/TRAN comparisons using `verify_utils` with NGSPICE.
 - Uses a fixed set of instance params `{L, TFIN, NFIN}` and one or two operating points.
 

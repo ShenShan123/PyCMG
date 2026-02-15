@@ -98,7 +98,7 @@ if _to_lower(key) == "nfin":
 
 **Issue**: Hardcoded path doesn't match actual directory structure.
 
-**Fix**: Changed from `asap7_pdk_r1p7/models/hspice` to `ASAP7`
+**Fix**: Changed from `asap7_pdk_r1p7/models/hspice` to `ASAP7/`
 
 ---
 
