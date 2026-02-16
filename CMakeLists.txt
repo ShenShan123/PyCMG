@@ -48,14 +48,3 @@ add_executable(osdi_eval
   cpp/osdi_eval.cpp
 )
 target_link_libraries(osdi_eval PRIVATE osdi_host)
-
-set(PYBIND11_FINDPYTHON ON)
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(pybind11 CONFIG REQUIRED)
-pybind11_add_module(_pycmg MODULE
-  cpp/pycmg_bindings.cpp
-)
-target_link_libraries(_pycmg PRIVATE osdi_host)
-set_target_properties(_pycmg PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/pycmg"
-)

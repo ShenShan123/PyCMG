@@ -1,7 +1,5 @@
 .worktrees/
-build-pycmg*/
-pycmg/*.so
-build-deep-verify/
+build*/
 __pycache__/
 tech_model_cards/TSMC*/
 tech_model_cards/TSMC*/*.l
