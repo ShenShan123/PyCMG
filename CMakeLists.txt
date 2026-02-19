@@ -38,13 +38,3 @@ target_include_directories(osdi_host PUBLIC
   "${CMAKE_SOURCE_DIR}/cpp"
 )
 target_link_libraries(osdi_host PRIVATE dl)
-
-add_executable(osdi_inspect
-  cpp/osdi_cli.cpp
-)
-target_link_libraries(osdi_inspect PRIVATE osdi_host)
-
-add_executable(osdi_eval
-  cpp/osdi_eval.cpp
-)
-target_link_libraries(osdi_eval PRIVATE osdi_host)

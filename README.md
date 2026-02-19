@@ -35,7 +35,7 @@ PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models thr
 
 | Technology | Node | Status | Vdd |
 |------------|------|--------|-----|
-| ASAP7 | 7nm | Production-ready | 0.70V |
+| ASAP7 | 7nm | Production-ready | 0.90V |
 | TSMC5 | 5nm | Verified | 0.65V |
 | TSMC7 | 7nm | Verified | 0.75V |
 | TSMC12 | 12nm | Verified | 0.80V |
@@ -46,16 +46,23 @@ PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models thr
 ### Step 1: Build OSDI Model
 ```bash
 # From project root
-./build_osdi.sh
+mkdir -p build-deep-verify && cd build-deep-verify
+cmake ..
+cmake --build . --target osdi
 ```
 
-### Step 2: Run Python Analysis
+Alternatively, compile directly with OpenVAF:
 ```bash
-# Quick API test (no NGSPICE comparison)
-python main.py test api
+openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
+```
 
-# Run integration tests with NGSPICE comparison
-pytest tests/test_integration.py -v
+### Step 2: Run Tests
+```bash
+# Quick API test (no NGSPICE required)
+pytest tests/test_api.py -v
+
+# Full test suite (NGSPICE required)
+pytest tests/ -v
 ```
 
 ## Installation
@@ -70,13 +77,13 @@ pytest tests/test_integration.py -v
 ### Build OSDI Binary
 
 ```bash
-# Option A: Using build script
-./build_osdi.sh
-
-# Option B: Manual build
+# Using CMake (recommended)
 mkdir -p build-deep-verify && cd build-deep-verify
 cmake ..
 cmake --build . --target osdi
+
+# Or compile directly with OpenVAF
+openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 ```
 
 The output will be at `build-deep-verify/osdi/bsimcmg.osdi`.
@@ -200,35 +207,34 @@ result = inst.eval_dc({"d": 0.7, "g": 0.5, "s": 0.0, "e": 0.0})
 
 ### Test Categories
 
-| Test File | Description | Duration | NGSPICE |
-|-----------|-------------|----------|---------|
-| `test_api.py` | API smoke tests | ~5s | No |
-| `test_integration.py` | NGSPICE comparison | ~30s | Yes |
-| `test_asap7.py` | ASAP7 PVT corners | ~2min | Yes |
-| `test_tsmc*.py` | TSMC verification | ~30s each | Yes |
+| Test File | Description | NGSPICE |
+|-----------|-------------|---------|
+| `test_api.py` | API smoke tests | No |
+| `test_dc_jacobian.py` | DC Jacobian verification | Yes |
+| `test_dc_regions.py` | DC operating region tests | Yes |
+| `test_transient.py` | Transient waveform verification | Yes |
 
 ### Quick Tests (No NGSPICE)
 
 ```bash
 # API smoke tests
 pytest tests/test_api.py -v
-
-# Run specific test
-pytest tests/test_api.py -v -k "test_eval_dc_smoke"
 ```
 
 ### Integration Tests (NGSPICE Required)
 
 ```bash
-# Full integration tests
-pytest tests/test_integration.py -v
+# DC Jacobian verification
+pytest tests/test_dc_jacobian.py -v
 
-# ASAP7 verification across PVT corners
-pytest tests/test_asap7.py -v
+# DC operating region tests
+pytest tests/test_dc_regions.py -v
 
-# TSMC verification
-pytest tests/test_tsmc7.py -v
-pytest tests/test_tsmc5.py -v
+# Transient verification
+pytest tests/test_transient.py -v
+
+# All tests
+pytest tests/ -v
 ```
 
 ### Environment Variables
@@ -250,18 +256,24 @@ pycmg-wrapper/
 │   ├── ctypes_host.py       # Core OSDI interface
 │   └── testing.py           # Verification utilities
 ├── tests/                    # Test suite
+│   ├── conftest.py          # Technology registry (ASAP7, TSMC5/7/12/16)
 │   ├── test_api.py          # API smoke tests
-│   ├── test_integration.py  # NGSPICE comparison
-│   ├── test_asap7.py        # ASAP7 PVT verification
-│   └── test_tsmc*.py        # TSMC verification
+│   ├── test_dc_jacobian.py  # DC Jacobian verification
+│   ├── test_dc_regions.py   # DC operating region tests
+│   └── test_transient.py    # Transient waveform verification
 ├── tech_model_cards/         # Technology model cards
 │   ├── ASAP7/               # ASAP7 model files
 │   ├── TSMC5/               # TSMC5 model files
 │   ├── TSMC7/               # TSMC7 model files
 │   ├── TSMC12/              # TSMC12 model files
 │   └── TSMC16/              # TSMC16 model files
+├── cpp/                      # C++ OSDI host (reference implementation)
+├── bsim-cmg-va/             # Verilog-A source and documentation
+├── scripts/                  # Utility scripts
+│   └── generate_naive_tsmc.py
 ├── build-deep-verify/        # Build artifacts
 │   └── osdi/bsimcmg.osdi    # Compiled OSDI binary
+├── CMakeLists.txt            # Build system
 └── main.py                   # CLI entrypoint
 ```
 

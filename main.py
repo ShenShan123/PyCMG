@@ -6,8 +6,9 @@ Simplified CLI for running PyCMG verification tests and data collection.
 
 Usage:
     python main.py test api           # Quick smoke tests
-    python main.py test integration   # NGSPICE comparison tests
-    python main.py test asap7         # ASAP7 PVT verification
+    python main.py test jacobian      # DC Jacobian verification vs NGSPICE
+    python main.py test regions       # DC operating region tests vs NGSPICE
+    python main.py test transient     # Transient waveform verification vs NGSPICE
     python main.py test all           # Run all tests
 """
 
@@ -32,8 +33,9 @@ def _test_suite(suite: str, pytest_args: List[str]) -> int:
     """Run a specific test suite."""
     test_map = {
         "api": ["tests/test_api.py", "-v"],
-        "integration": ["tests/test_integration.py", "-v"],
-        "asap7": ["tests/test_asap7.py", "-v"],
+        "jacobian": ["tests/test_dc_jacobian.py", "-v"],
+        "regions": ["tests/test_dc_regions.py", "-v"],
+        "transient": ["tests/test_transient.py", "-v"],
         "all": ["tests/", "-v"],
     }
 
@@ -51,14 +53,16 @@ def _print_usage() -> None:
     print(__doc__)
     print("\nAvailable test suites:")
     print("  api           Quick API validation (~5s, no NGSPICE required)")
-    print("  integration   NGSPICE comparison tests (~30s)")
-    print("  asap7         ASAP7 PVT verification (~5min)")
-    print("  all           Run all tests (~5.5min)")
+    print("  jacobian      DC Jacobian verification vs NGSPICE (~30s)")
+    print("  regions       DC operating region tests vs NGSPICE (~30s)")
+    print("  transient     Transient waveform verification vs NGSPICE (~30s)")
+    print("  all           Run all tests (~2min)")
     print()
     print("Examples:")
     print("  python main.py test api")
-    print("  python main.py test integration")
-    print("  python main.py test asap7 -v")
+    print("  python main.py test jacobian")
+    print("  python main.py test regions -v")
+    print("  python main.py test transient")
     print("  python main.py test all --tb=short")
 
 
@@ -71,7 +75,7 @@ def main() -> int:
     parser.add_argument(
         "suite",
         nargs="?",
-        choices=["api", "integration", "asap7", "all"],
+        choices=["api", "jacobian", "regions", "transient", "all"],
         help="Test suite to run",
     )
     parser.add_argument(

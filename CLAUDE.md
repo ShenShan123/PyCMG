@@ -26,28 +26,26 @@ The OSDI binary is the single source of truth for all model physics calculations
 ```
 pycmg-wrapper/
 ├── bsim-cmg-va/              # Verilog-A source files
-│   ├── *.va                  # Main model files
-│   └── benchmark_test/       # SPICE netlists and model cards for verification
+│   ├── code/                 # Main model Verilog-A files
+│   ├── README.txt           # Original BSIM-CMG documentation
+│   ├── *.pdf                 # Technical manuals (3 PDFs)
 ├── pycmg/                    # Python package
 │   ├── __init__.py          # Public API exports
 │   ├── ctypes_host.py       # Core OSDI interface (Model, Instance, eval_dc, eval_tran)
-│   └── testing.py           # Verification utilities (moved from tests/verify_utils.py)
-├── cpp/                      # C++ OSDI host
+│   └── testing.py           # Verification utilities
+├── cpp/                      # C++ OSDI host (reference, not used by Python ctypes)
 │   ├── osdi_host.h          # Header file
 │   ├── osdi_host.cpp        # Core host implementation
-│   ├── osdi_cli.cpp         # CLI tool (osdi_eval)
-│   └── pycmg_bindings.cpp   # PyBind11 bindings (optional, not currently used)
+│   ├── osdi_cli.cpp         # CLI inspector tool
+│   └── osdi_eval.cpp        # CLI evaluator tool
 ├── tests/                    # Test suite
-│   ├── conftest.py          # Pytest fixtures
+│   ├── __init__.py          # Package init
+│   ├── conftest.py          # Technology registry (5 techs: ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
 │   ├── test_api.py          # Public API tests (smoke, basic functionality)
-│   ├── test_asap7.py        # ASAP7 verification (optimized PVT corners)
-│   ├── test_integration.py  # NGSPICE comparison tests (representative subset)
-│   ├── test_tsmc5.py        # TSMC5 verification (naive modelcards)
-│   ├── test_tsmc7.py        # TSMC7 verification (naive modelcards)
-│   ├── test_tsmc12.py       # TSMC12 verification (naive modelcards)
-│   └── test_tsmc16.py       # TSMC16 verification (naive modelcards)
+│   ├── test_dc_jacobian.py  # DC Jacobian verification vs NGSPICE
+│   ├── test_dc_regions.py   # DC operating region tests vs NGSPICE
+│   └── test_transient.py    # Transient waveform verification vs NGSPICE
 ├── scripts/                  # Utility scripts
-│   ├── generate_naive_tsmc7.py  # TSMC7-specific naive modelcard generator
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── tech_model_cards/         # Technology model cards
 │   ├── ASAP7/               # ASAP7 PDK model files
@@ -63,7 +61,7 @@ pycmg-wrapper/
 │   ├── osdi/                # Compiled .osdi files
 │   └── ngspice_eval/        # Verification outputs
 ├── main.py                   # CLI entrypoint for quick test execution
-└── README.md                 # This file
+└── CLAUDE.md                 # This file
 ```
 
 ### Module Organization
@@ -76,13 +74,19 @@ pycmg-wrapper/
 * **`pycmg/testing.py`**: Verification and testing utilities
   - NGSPICE runner helpers
   - Comparison functions (DC, AC, TRAN)
-  - ASAP7 modelcard handling
+  - Technology modelcard handling
   - Stress testing utilities
 
+* **`tests/conftest.py`**: Technology registry
+  - `TECHNOLOGIES` dict: 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
+  - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params
+  - Provides parametrization for all verification tests
+
 * **`tests/`**: Test suite
-  - `test_api.py`: Quick smoke tests for public API
-  - `test_asap7.py**: Full ASAP7 verification (TT, SS, FF corners at representative temps)
-  - `test_integration.py`: NGSPICE ground truth comparison (limited sweep points)
+  - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
+  - `test_dc_jacobian.py`: DC Jacobian verification across all 5 technologies
+  - `test_dc_regions.py`: DC operating region tests across all 5 technologies
+  - `test_transient.py`: Transient waveform verification across all 5 technologies
 
 ## PyCMG Output Coverage
 
@@ -91,7 +95,7 @@ PyCMG provides comprehensive model outputs covering currents, derivatives, charg
 ### Supported Outputs (18 total)
 
 | Category | Outputs | Description |
-|----------|----------|-------------|
+|----------|---------|-------------|
 | **Currents** | `id`, `ig`, `is`, `ie`, `ids` | Terminal currents + drain-source current (Id-Is) |
 | **Derivatives** | `gm`, `gds`, `gmb` | Transconductance, output conductance, bulk transconductance |
 | **Charges** | `qg`, `qd`, `qs`, `qb` | Gate, drain, source, bulk charges |
@@ -132,13 +136,7 @@ The Verilog-A source must be compiled to OSDI format using OpenVAF.
 
 **Build Methods:**
 
-**Option A: Using the build script (Recommended)**
-```bash
-# From project root
-./build_osdi.sh
-```
-
-**Option B: Manual CMake build**
+**Option A: Manual CMake build (Recommended)**
 ```bash
 # Install pybind11 if not present
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pybind11
@@ -157,7 +155,7 @@ cmake -Dpybind11_DIR=$(python -m pybind11 --cmakedir) ..
 cmake --build . --target osdi
 ```
 
-**Option C: Direct OpenVAF compilation**
+**Option B: Direct OpenVAF compilation**
 ```bash
 # Compile Verilog-A directly without CMake
 openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
@@ -201,22 +199,21 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     3.  Compare currents ($I_d, I_g$) and Derivatives ($g_m, g_{ds}$) numerically.
     4.  Assert accuracy within accepted tolerance (e.g., `ABS_TOL_I=1e-9`, `REL_TOL=5e-3`).
 * **Test Strategy:**
-    * **ASAP7 tests** (`tests/test_asap7.py`): Primary verification across PVT corners
-      * TT (typical), SS (slow), FF (fast) corners
-      * Representative temperatures: -40°C, 27°C, 85°C, 125°C
-      * DC, AC (capacitance), and TRAN verification
-    * **TSMC FinFET tests** (`tests/test_tsmc{5,7,12,16}.py`): Multi-node verification
-      * TSMC5 (5nm, Vdd=0.65V), TSMC7 (7nm, Vdd=0.75V), TSMC12 (12nm, Vdd=0.80V), TSMC16 (16nm, Vdd=0.80V)
-      * NMOS SVT and PMOS LVT operating points per node
-      * Temperature sweeps (-40°C to 125°C) and voltage sweeps
-      * Uses naive modelcards generated by `scripts/generate_naive_tsmc.py`
-      * Modelcard baking for NGSPICE OSDI compatibility
-    * **Integration tests** (`tests/test_integration.py`): NGSPICE comparison
-      * Limited voltage sweep points (not exhaustive)
-      * Focus on critical operating regions
+    * **Technology Registry** (`tests/conftest.py`): Centralized parametrization across 5 technologies
+      - ASAP7, TSMC5, TSMC7, TSMC12, TSMC16
+      - Each tech has vdd, modelcard paths, instance params
+    * **DC Jacobian tests** (`tests/test_dc_jacobian.py`): Verify DC derivatives vs NGSPICE
+      - Tests all 5 technologies using the registry
+      - Covers gm, gds, gmb derivatives
+    * **DC Region tests** (`tests/test_dc_regions.py`): DC operating region verification
+      - Tests all 5 technologies using the registry
+      - Covers subthreshold, linear, saturation regions
+    * **Transient tests** (`tests/test_transient.py`): Transient waveform verification
+      - Tests all 5 technologies using the registry
+      - Covers charge/ discharge waveforms
     * **API tests** (`tests/test_api.py`): Quick smoke tests
-      * Basic functionality verification
-      * No NGSPICE comparison (fast execution)
+      - Basic functionality verification
+      - No NGSPICE comparison (fast execution)
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).
@@ -227,16 +224,16 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     * *Output:* OSDI Results (Values + Derivatives) -> Numpy Arrays -> Verification.
 
 ## Other Tips in This Project
-* **Start every complex task in plan mode:** 
+* **Start every complex task in plan mode:**
     * Pour your energy into the plan for 1-shot the implementation.
     * The moment something goes sideways, just switch back to plan mode and re-plan. Don't keep pushing.
     * Enter plan mode for verification steps, not just for the build.
 * **Update CLAUDE.md:**
     * After every correction, update your CLAUDE.md so you don't make that mistake again.
-* **Never be lazy:** 
+* **Never be lazy:**
     * Never be lazy in writing the code and running tests.
     * Do NOT use any simplifed equations or self-defined CMG models as reference, ALWAYS use simulation results as ground truth for comparison.
-* Use subagents. 
+* Use subagents.
     * Use a second agent to review the plan as a staff engineer.
     * If you want to try multiple solutions, use multiple subagents, git commit to different branches. Roll back and to the main branch and create new branch when the subagent find it's a dead end.
 * Enable the "Explanatory" or "Learning" output style in /config to explain the *why* behind its changes.
@@ -247,7 +244,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 - **NGSPICE OSDI does NOT support instance-line parameters**: Unlike HSPICE or Spectre, NGSPICE's OSDI interface cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters (L, TFIN, NFIN) must be **baked into the `.model` block** in the modelcard file.
 
-- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `test_tsmc7.py` inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
+- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `pycmg/testing.py` inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
 
 - **PMOS DEVTYPE in multi-model files**: When a modelcard contains multiple `.model` blocks (e.g., NMOS + PMOS in one file), `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed. Otherwise PMOS inherits DEVTYPE=1 from the first (NMOS) model, causing inverted behavior.
 
@@ -280,18 +277,18 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
   - For NMOS models: injects `devtype = 1.0`
 
-- **Implementation**: Applied to both ASAP7 and TSMC7 parsing functions for consistency
+- **Implementation**: Applied to both ASAP7 and TSMC parsing functions for consistency
 
 - **Result**: Original ASAP7 modelcard files remain unmodified; PMOS models now work correctly without manual workarounds
 
-- **Verification**: All 16 API and ASAP7 tests pass; DEVTYPE injection verified via Python test
+- **Verification**: DEVTYPE injection verified via Python tests; all verification tests use the technology registry
 
 
 ### Modelcard Parsing & Parameter Handling (2026-02-13 Round 1)
 - **Double assignment bug in `_parse_params()`**: The original code had `parsed_params[key] = parsed` followed by conditional blocks that modified `parsed` without storing back. This caused `nfin` defaults to never be applied. Fixed by using `if-elif-elif` chain with single assignment at end.
 - **SPICE suffix capture**: When updating regex patterns, ensure the `[a-zA-Z]*` suffix pattern remains INSIDE the value capture group, otherwise suffixes like `n`, `p`, `u` are lost during parsing.
 - **Scientific notation regex**: The pattern `[0-9eE+\-\.]+` was fragile because it matched `+` and `-` in any position. Use `[0-9]*\.?[0-9]+(?:[eE][+\-]?[0-9]+)?` for proper scientific notation.
-- **EOTACC clamping inconsistency**: Different thresholds were used in `parse_modelcard()` vs `_make_ngspice_modelcard()`. Standardized to `<= 1.0e-10` → `1.1e-10` across all locations (Python, C++ CLI, C++ bindings).
+- **EOTACC clamping inconsistency**: Different thresholds were used in `parse_modelcard()` vs `_make_ngspice_modelcard()`. Standardized to `<= 1.0e-10` -> `1.1e-10` across all locations (Python, C++ CLI, C++ bindings).
 - **Parameter validation**: Added checks for NaN, inf, and inappropriate negative values in `OsdiModel.set_param()` to prevent silent corruption.
 
 ### Case Sensitivity & Parameter Storage (2026-02-13 Round 2)
@@ -300,11 +297,11 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ### Testing & Verification (2026-02-13 Round 1)
 - **Assertion tolerance selection**: The `_assert_close()` function was using `ABS_TOL_I` (1e-9) for ALL parameters, but charges need `ABS_TOL_Q` (1e-18). Added auto-selection based on parameter name.
-- **Temperature list completeness**: Test documentation mentioned -40°C but `TEST_TEMPS` list was missing it. Added -40.0°C for comprehensive temperature coverage.
+- **Temperature list completeness**: Test documentation mentioned -40C but `TEST_TEMPS` list was missing it. Added -40.0C for comprehensive temperature coverage.
 - **Model file naming**: PVT_CORNERS dict used hard-coded `.pm` extensions that didn't match actual files. Changed to base patterns for glob matching.
 
 ### Documentation (2026-02-13 Round 2)
-- **Temperature units documentation**: Added comprehensive docstrings explaining that ALL temperatures in the module are in KELVIN. Provided conversion formula `temp_K = temp_C + 273.15` and practical examples for common temperatures (-40°C, 27°C, 85°C, 125°C).
+- **Temperature units documentation**: Added comprehensive docstrings explaining that ALL temperatures in the module are in KELVIN. Provided conversion formula `temp_K = temp_C + 273.15` and practical examples for common temperatures (-40C, 27C, 85C, 125C).
 - **Accessible documentation**: Users can now access via `help(pycmg.ctypes_host)`, `help(Model)`, `help(Instance)`, etc.
 
 ### Code Quality (2026-02-13 Round 1 & 2)
@@ -320,95 +317,47 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - Stress tests must align NGSPICE sign conventions: compare `i(vx)` directly to pycmg currents (no sign flip) for OP.
 
 ## Gap Checklist (Inventory vs Workflow)
-- ✅ OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
-- ✅ C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
-- ✅ Python ctypes host: `pycmg/ctypes_host.py` exposes `Model`, `Instance`, `eval_dc`, `eval_tran`.
-- ✅ Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
-- ✅ Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
-- ✅ ASAP7 verification: `tests/test_asap7.py` runs DC/AC/TRAN across PVT corners.
-- ✅ TSMC7 verification: `tests/test_tsmc7.py` runs NMOS/PMOS with naive modelcards.
-- ✅ TSMC5 verification: `tests/test_tsmc5.py` runs NMOS/PMOS with naive modelcards.
-- ✅ TSMC12 verification: `tests/test_tsmc12.py` runs NMOS/PMOS with naive modelcards.
-- ✅ TSMC16 verification: `tests/test_tsmc16.py` runs NMOS/PMOS with naive modelcards.
-- ✅ Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
-- ⚠️ PyBind11 layer: `cpp/pycmg_bindings.cpp` exists but ctypes implementation is currently used.
+- OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
+- C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
+- Python ctypes host: `pycmg/ctypes_host.py` exposes `Model`, `Instance`, `eval_dc`, `eval_tran`.
+- Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
+- Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
+- Technology registry: `tests/conftest.py` defines 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16).
+- DC Jacobian tests: `tests/test_dc_jacobian.py` parametrized across all 5 technologies.
+- DC Region tests: `tests/test_dc_regions.py` parametrized across all 5 technologies.
+- Transient tests: `tests/test_transient.py` parametrized across all 5 technologies.
+- API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
+- Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
+- C++ OSDI host: `cpp/osdi_host.cpp` exists as reference; Python uses ctypes directly.
 
 ## Technology Modelcard Verification
 
-### ASAP7 (7nm PDK)
-- **Status**: ✅ Fully verified
-- **Test File**: `tests/test_asap7.py`
-- **Coverage**: TT, SS, FF corners at -40°C, 27°C, 85°C, 125°C
-- **Outputs**: All 18 model outputs (currents, derivatives, charges)
-- **Result**: PyCMG and NGSPICE produce binary-identical results within specified tolerances
+All verification tests use the centralized technology registry in `tests/conftest.py`, which parametrizes tests across all 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16) with consistent test coverage.
 
-### TSMC7 (Taiwan Semiconductor 7nm)
-- **Status**: ✅ Verified (2026-02-14)
-- **Test File**: `tests/test_tsmc7.py`
-- **Modelcards**: `tech_model_cards/TSMC7/naive/` directory
-  - NMOS: `nch_svt_mac_l16nm.l` (L=16nm, TFIN=6nm, NFIN=2)
-  - PMOS: `pch_lvt_mac_l20nm.l` (L=20nm to avoid NGSPICE convergence failure)
-- **Coverage**: 4 tests covering NMOS SVT, PMOS LVT, temperature sweep, voltage sweep
-- **Test Results**: All 4 tests pass
+### Technology Registry Coverage
 
-| Test | Description | Result |
-|------|-------------|--------|
-| `test_tsmc7_nmos_svt_op` | NMOS operating point at L=16nm | ✅ Pass |
-| `test_tsmc7_pmos_lvt_op` | PMOS operating point at L=20nm | ✅ Pass |
-| `test_tsmc7_temperature_sweep` | -40°C to 125°C | ✅ Pass |
-| `test_tsmc7_voltage_sweep` | Vg sweep 0V to 0.8V | ✅ Pass |
+| Technology | Vdd | NMOS Modelcard | PMOS Modelcard | NMOS L | PMOS L |
+|------------|-----|----------------|----------------|--------|--------|
+| ASAP7 | 0.9V | 7nm_TT_160803.pm | 7nm_TT_160803.pm | 7nm | 7nm |
+| TSMC5 | 0.65V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
+| TSMC7 | 0.75V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
+| TSMC12 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
+| TSMC16 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
 
-**Key Implementation Details**:
-- **Modelcard baking**: `_bake_inst_params_into_modelcard()` injects instance params (L, TFIN, NFIN) before the closing `)` of the `.model` block
+### Verification Test Types
+
+| Test File | Coverage | Description |
+|-----------|----------|-------------|
+| `test_dc_jacobian.py` | All 5 techs | DC derivatives (gm, gds, gmb) vs NGSPICE |
+| `test_dc_regions.py` | All 5 techs | DC operating regions (subthreshold, linear, saturation) |
+| `test_transient.py` | All 5 techs | Transient charge/discharge waveforms |
+| `test_api.py` | Smoke only | Basic functionality, no NGSPICE |
+
+### Key Implementation Details
+
+- **Modelcard baking**: `_bake_inst_params_into_modelcard()` in `pycmg/testing.py` injects instance params (L, TFIN, NFIN, DEVTYPE) before the closing `)` of the `.model` block
 - **NGSPICE OSDI limitation**: Cannot accept instance params on device line; must be in `.model` block
-- **PMOS L=16nm caveat**: Invalid `PDIBL2_i=-0.118` from binning causes NGSPICE convergence failure; use L≥20nm
+- **PMOS L=16nm caveat**: For TSMC nodes, invalid binning parameters at L=16nm cause NGSPICE convergence failure; use L=20nm for PMOS
 - **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, REL_TOL=5e-3
-
-### TSMC5 (Taiwan Semiconductor 5nm)
-- **Status**: ✅ Verified (2026-02-14)
-- **Test File**: `tests/test_tsmc5.py`
-- **Modelcards**: `tech_model_cards/TSMC5/naive/` directory
-  - NMOS: `nch_svt_mac_l16nm.l` (L=16nm, TFIN=6nm, NFIN=2)
-  - PMOS: `pch_lvt_mac_l20nm.l` (L=20nm, TFIN=6nm, NFIN=2)
-- **Coverage**: 4 tests (NMOS SVT OP, PMOS LVT OP, temperature sweep, voltage sweep)
-- **Vdd**: 0.65V (5nm core voltage)
-- **Sentinel Fix**: CTH0=-99900000000.0 filtered during naive modelcard generation
-
-| Test | Description | Result |
-|------|-------------|--------|
-| `test_tsmc5_nmos_svt_op` | NMOS operating point at L=16nm | ✅ Pass |
-| `test_tsmc5_pmos_lvt_op` | PMOS operating point at L=20nm | ✅ Pass |
-| `test_tsmc5_temperature_sweep` | -40°C to 125°C | ✅ Pass |
-| `test_tsmc5_voltage_sweep` | Vg/Vd sweep at Vdd=0.65V | ✅ Pass |
-
-### TSMC12 (Taiwan Semiconductor 12nm)
-- **Status**: ✅ Verified (2026-02-14)
-- **Test File**: `tests/test_tsmc12.py`
-- **Modelcards**: `tech_model_cards/TSMC12/naive/` directory
-  - NMOS: `nch_svt_mac_l16nm.l` (L=16nm, TFIN=6nm, NFIN=2)
-  - PMOS: `pch_lvt_mac_l20nm.l` (L=20nm, TFIN=6nm, NFIN=2)
-- **Coverage**: 4 tests (NMOS SVT OP, PMOS LVT OP, temperature sweep, voltage sweep)
-- **Vdd**: 0.80V (12nm core voltage)
-
-| Test | Description | Result |
-|------|-------------|--------|
-| `test_tsmc12_nmos_svt_op` | NMOS operating point at L=16nm | ✅ Pass |
-| `test_tsmc12_pmos_lvt_op` | PMOS operating point at L=20nm | ✅ Pass |
-| `test_tsmc12_temperature_sweep` | -40°C to 125°C | ✅ Pass |
-| `test_tsmc12_voltage_sweep` | Vg/Vd sweep at Vdd=0.80V | ✅ Pass |
-
-### TSMC16 (Taiwan Semiconductor 16nm)
-- **Status**: ✅ Verified (2026-02-14)
-- **Test File**: `tests/test_tsmc16.py`
-- **Modelcards**: `tech_model_cards/TSMC16/naive/` directory
-  - NMOS: `nch_svt_mac_l16nm.l` (L=16nm, TFIN=6nm, NFIN=2)
-  - PMOS: `pch_lvt_mac_l20nm.l` (L=20nm, TFIN=6nm, NFIN=2)
-- **Coverage**: 4 tests (NMOS SVT OP, PMOS LVT OP, temperature sweep, voltage sweep)
-- **Vdd**: 0.80V (16nm core voltage)
-
-| Test | Description | Result |
-|------|-------------|--------|
-| `test_tsmc16_nmos_svt_op` | NMOS operating point at L=16nm | ✅ Pass |
-| `test_tsmc16_pmos_lvt_op` | PMOS operating point at L=20nm | ✅ Pass |
-| `test_tsmc16_temperature_sweep` | -40°C to 125°C | ✅ Pass |
-| `test_tsmc16_voltage_sweep` | Vg/Vd sweep at Vdd=0.80V | ✅ Pass |
+- **DEVTYPE injection**: Automatic injection of devtype=1.0 (NMOS) or devtype=0.0 (PMOS) for models missing this parameter
+- **Sentinel filtering**: TSMC PDK sentinel values (-999*10^n) filtered during naive modelcard generation

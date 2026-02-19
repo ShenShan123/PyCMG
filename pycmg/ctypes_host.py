@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 PyCMG ctypes-based OSDI interface
 
@@ -28,6 +27,8 @@ Common temperatures:
    125°C  →  398.15 K  (max junction)
 """
 
+from __future__ import annotations
+
 
 import ctypes
 import ctypes.util
@@ -39,7 +40,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-# OSDI constants (osdi_0_3.h)
+# ---------------------------------------------------------------------------
+# OSDI constants (from osdi_0_3.h)
+# ---------------------------------------------------------------------------
 PARA_TY_MASK = 3
 PARA_TY_REAL = 0
 PARA_TY_INT = 1
@@ -84,6 +87,10 @@ UINT32_MAX = 0xFFFFFFFF
 
 _INSTANCE_NAME = ctypes.c_char_p(b"osdi_host")
 
+
+# ---------------------------------------------------------------------------
+# OSDI ctypes structure definitions
+# ---------------------------------------------------------------------------
 
 class OsdiLimFunction(ctypes.Structure):
     _fields_ = [
@@ -178,6 +185,10 @@ class OsdiNoiseSource(ctypes.Structure):
     ]
 
 
+# ---------------------------------------------------------------------------
+# OSDI function type declarations
+# ---------------------------------------------------------------------------
+
 ACCESS_FUNC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                ctypes.c_uint32, ctypes.c_uint32)
 SETUP_MODEL_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p,
@@ -206,6 +217,10 @@ LOAD_JACOBIAN_REACT_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void
 LOAD_JACOBIAN_TRAN_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p,
                                            ctypes.c_double)
 
+
+# ---------------------------------------------------------------------------
+# OSDI descriptor — main interface struct
+# ---------------------------------------------------------------------------
 
 class OsdiDescriptor(ctypes.Structure):
     _fields_ = [
@@ -247,6 +262,10 @@ class OsdiDescriptor(ctypes.Structure):
         ("load_jacobian_tran", LOAD_JACOBIAN_TRAN_FUNC),
     ]
 
+
+# ---------------------------------------------------------------------------
+# Memory management helpers
+# ---------------------------------------------------------------------------
 
 def _load_libc() -> Optional[ctypes.CDLL]:
     path = ctypes.util.find_library("c")
@@ -293,6 +312,10 @@ class AlignedBuffer:
         self.close()
 
 
+# ---------------------------------------------------------------------------
+# OSDI callback implementations (limiting, logging)
+# ---------------------------------------------------------------------------
+
 @ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_bool, ctypes.POINTER(ctypes.c_bool),
                   ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double)
 def _pnjlim(init: bool,
@@ -332,6 +355,10 @@ def _osdi_log(handle: ctypes.c_void_p, msg: ctypes.c_char_p, lvl: int) -> None:
     level = lvl & LOG_LVL_MASK
     sys.stderr.write(f"osdi[{instance.decode('utf-8', errors='replace')}] lvl={level} {text}\n")
 
+
+# ---------------------------------------------------------------------------
+# Modelcard parsing
+# ---------------------------------------------------------------------------
 
 def parse_number_with_suffix(token: str) -> float:
     s = token.strip()
@@ -529,16 +556,6 @@ def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> Pa
     return ParsedModel(name=base_name, params=merged_params)
 
 
-# Backward-compatible alias for parse_tsmc_pdk
-def parse_tsmc7_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
-    """
-    Backward-compatible alias for parse_tsmc_pdk.
-
-    See parse_tsmc_pdk for full documentation.
-    """
-    return parse_tsmc_pdk(path, model_type, device_type, L)
-
-
 def _find_length_variant(path: str, base_name: str, L: float) -> int:
     """
     Find which length variant matches L value.
@@ -640,6 +657,7 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
         idx += 1
 
     raise RuntimeError(f"No length variant found for {base_name} with L={L:.3e} in file: {path}")
+
 
 def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dict[str, float]:
     """
@@ -764,6 +782,10 @@ def _check_init_result(desc: Optional[OsdiDescriptor], info: OsdiInitInfo) -> No
         sys.stderr.write(f"OSDI init warning: {msg}\n")
 
 
+# ---------------------------------------------------------------------------
+# OSDI library loader and model/instance wrappers
+# ---------------------------------------------------------------------------
+
 class OsdiLibrary:
     def __init__(self, path: str) -> None:
         mode = getattr(ctypes, "RTLD_LOCAL", 0) | getattr(ctypes, "RTLD_NOW", 0)
@@ -873,6 +895,10 @@ class OsdiModel:
                 return
         raise RuntimeError(f"parameter not found: {name}")
 
+
+# ---------------------------------------------------------------------------
+# Simulation state management
+# ---------------------------------------------------------------------------
 
 class OsdiSimulation:
     def __init__(self) -> None:
@@ -1225,6 +1251,10 @@ class OsdiInstance:
         return back_map
 
 
+# ---------------------------------------------------------------------------
+# Parameter application
+# ---------------------------------------------------------------------------
+
 def apply_param(desc: OsdiDescriptor,
                 inst: Optional[OsdiInstance],
                 model: Optional[OsdiModel],
@@ -1265,6 +1295,10 @@ def apply_param(desc: OsdiDescriptor,
         raise RuntimeError(f"parameter not found: {name}")
     return applied
 
+
+# ---------------------------------------------------------------------------
+# Public API: Model and Instance
+# ---------------------------------------------------------------------------
 
 class Model:
     """
@@ -1801,126 +1835,4 @@ class Instance:
         return out
 
 
-def select_tsmc7_variant(modelcard_path: str, model_type: str, L: float) -> str:
-    """
-    Select the appropriate TSMC7 model variant based on device length.
-
-    TSMC7 modelcards have multiple variants (e.g., nch_svt_mac.1, .2, etc.)
-    with different L ranges defined by lmin and lmax parameters.
-    This function reads the modelcard and returns the full model name
-    (including variant suffix) that matches the given device length.
-
-    Args:
-        modelcard_path: Path to TSMC7 .l file
-        model_type: Base model name (e.g., "nch_svt_mac")
-        L: Device length in meters
-
-    Returns:
-        Full model name with variant (e.g., "nch_svt_mac.5")
-
-    Raises:
-        ValueError: If no variant matches the given L, or if modelcard is invalid
-    """
-    # Escape special regex characters in model_type
-    model_type_escaped = re.escape(model_type)
-    # Match both nmos and pmos models
-    variant_pattern = re.compile(
-        rf'\.model ({model_type_escaped}\.\d+) (nmos|pmos)'
-    )
-
-    # Read and parse the modelcard
-    variants = []
-    with open(modelcard_path, "r", encoding="utf-8") as fh:
-        lines = fh.readlines()
-
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
-        # Look for model definition
-        match = variant_pattern.match(line.strip())
-        if match:
-            variant_name = match.group(1)
-            lmin = None
-            lmax = None
-
-            # First, check the initial .model line for lmin and lmax
-            # (some models like pch have them on the same line)
-            lmin_match = re.search(r'\blmin\s*=\s*([0-9eE+\-\.]+)', line)
-            lmax_match = re.search(r'\blmax\s*=\s*([0-9eE+\-\.]+)', line)
-
-            if lmin_match:
-                lmin = parse_number_with_suffix(lmin_match.group(1))
-            if lmax_match:
-                lmax = parse_number_with_suffix(lmax_match.group(1))
-
-            # If not found on the initial line, scan continuation lines
-            if lmin is None or lmax is None:
-                j = idx + 1
-                while j < len(lines):
-                    param_line = lines[j]
-                    if not param_line.startswith("+"):
-                        # End of model block
-                        break
-
-                    # Extract lmin and lmax
-                    if lmin is None:
-                        lmin_match = re.search(r'\blmin\s*=\s*([0-9eE+\-\.]+)', param_line)
-                        if lmin_match:
-                            lmin = parse_number_with_suffix(lmin_match.group(1))
-
-                    if lmax is None:
-                        lmax_match = re.search(r'\blmax\s*=\s*([0-9eE+\-\.]+)', param_line)
-                        if lmax_match:
-                            lmax = parse_number_with_suffix(lmax_match.group(1))
-
-                    # Once we have both, we can stop scanning this model
-                    if lmin is not None and lmax is not None:
-                        break
-
-                    j += 1
-
-            # Only add variants that have both lmin and lmax
-            if lmin is not None and lmax is not None:
-                variants.append({
-                    "name": variant_name,
-                    "lmin": lmin,
-                    "lmax": lmax
-                })
-
-        idx += 1
-
-    if not variants:
-        raise ValueError(
-            f"No TSMC7 variants found for model '{model_type}' in {modelcard_path}"
-        )
-
-    # Find the best matching variant
-    # L should satisfy: lmin <= L <= lmax
-    # For overlapping ranges, prefer the variant with the smallest range
-    # (i.e., the most precise match)
-    matching_variants = [
-        v for v in variants
-        if v["lmin"] <= L <= v["lmax"]
-    ]
-
-    if not matching_variants:
-        # No match found - provide helpful error message
-        # Sort variants by lmin for better error display
-        sorted_variants = sorted(variants, key=lambda v: v["lmin"])
-
-        ranges_str = ", ".join(
-            f"{v['name']} ({v['lmin']:.3e} to {v['lmax']:.3e})"
-            for v in sorted_variants
-        )
-
-        raise ValueError(
-            f"No TSMC7 variant found for L={L:.3e}. "
-            f"Available ranges for {model_type}: {ranges_str}"
-        )
-
-    # Select the variant with the smallest range (most precise match)
-    best_variant = min(matching_variants, key=lambda v: v["lmax"] - v["lmin"])
-    return best_variant["name"]
-
-
-__all__ = ["Model", "Instance", "parse_number_with_suffix", "select_tsmc7_variant"]
+__all__ = ["Model", "Instance", "parse_number_with_suffix", "parse_modelcard"]
