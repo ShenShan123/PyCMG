@@ -38,13 +38,17 @@ pycmg-wrapper/
 │   ├── osdi_host.cpp        # Core host implementation
 │   ├── osdi_cli.cpp         # CLI inspector tool
 │   └── osdi_eval.cpp        # CLI evaluator tool
-├── tests/                    # Test suite
+├── tests/                    # Test suite (138 tests)
 │   ├── __init__.py          # Package init
 │   ├── conftest.py          # Technology registry (5 techs: ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
 │   ├── test_api.py          # Public API tests (smoke, basic functionality)
-│   ├── test_dc_jacobian.py  # DC Jacobian verification vs NGSPICE
-│   ├── test_dc_regions.py   # DC operating region tests vs NGSPICE
-│   └── test_transient.py    # Transient waveform verification vs NGSPICE
+│   ├── test_ac_caps.py      # AC capacitance verification vs NGSPICE
+│   ├── test_body_bias.py    # Body bias (Ve != 0) verification vs NGSPICE
+│   ├── test_dc_jacobian.py  # DC Jacobian verification vs NGSPICE (NMOS+PMOS)
+│   ├── test_dc_regions.py   # DC operating region tests vs NGSPICE (NMOS+PMOS)
+│   ├── test_nfin_scaling.py # NFIN scaling sanity tests (PyCMG-only)
+│   ├── test_temperature.py  # Temperature verification vs NGSPICE
+│   └── test_transient.py    # Transient waveform verification vs NGSPICE (NMOS+PMOS)
 ├── scripts/                  # Utility scripts
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── tech_model_cards/         # Technology model cards
@@ -82,11 +86,15 @@ pycmg-wrapper/
   - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params
   - Provides parametrization for all verification tests
 
-* **`tests/`**: Test suite
+* **`tests/`**: Test suite (138 tests total)
   - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
-  - `test_dc_jacobian.py`: DC Jacobian verification across all 5 technologies
-  - `test_dc_regions.py`: DC operating region tests across all 5 technologies
-  - `test_transient.py`: Transient waveform verification across all 5 technologies
+  - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 technologies
+  - `test_dc_regions.py`: DC operating region tests, NMOS+PMOS across all 5 technologies
+  - `test_transient.py`: Transient waveform verification, NMOS+PMOS across all 5 technologies
+  - `test_ac_caps.py`: AC capacitance verification (cgg, cgd, cgs, cdg, cdd) vs NGSPICE
+  - `test_body_bias.py`: Body bias (Ve != 0) verification across all 5 technologies
+  - `test_temperature.py`: Temperature verification (-40C, 85C, 125C) vs NGSPICE
+  - `test_nfin_scaling.py`: NFIN scaling sanity tests (PyCMG-only)
 
 ## PyCMG Output Coverage
 
@@ -240,6 +248,33 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ## Lessons from Bugs (Keep Coming)
 
+### Capacitance Sign Convention in _condense_caps() (2026-02-19)
+
+- **Bug**: Off-diagonal capacitances (cgd, cgs, cdg) returned by `_condense_caps()` in `pycmg/ctypes_host.py` had the wrong sign, causing mismatches against NGSPICE `@n1[cXX]` operating-point variables.
+
+- **Root cause**: The OSDI reactive Jacobian (dQ/dV) uses **Y-matrix convention**, where off-diagonal entries are negative (e.g., `dQg/dVd < 0`). However, SPICE capacitance variables like `@n1[cgd]` use the **opposite sign convention** for off-diagonals — they report `cgd = -dQg/dVd > 0`. The `_condense_caps()` function was extracting raw matrix entries without applying this sign flip.
+
+- **Fix**: Negate off-diagonal entries when extracting from the condensed capacitance matrix:
+  ```python
+  # Diagonal: no negation
+  caps["cgg"] = float(c_condensed[g, g])
+  caps["cdd"] = float(c_condensed[d, d])
+  # Off-diagonal: negate to match SPICE convention
+  caps["cgd"] = -float(c_condensed[g, d])
+  caps["cgs"] = -float(c_condensed[g, s])
+  caps["cdg"] = -float(c_condensed[d, g])
+  ```
+
+- **Lesson**: When extracting small-signal parameters from OSDI Jacobian matrices, always verify sign conventions against NGSPICE. The OSDI binary returns raw matrix entries in Y-matrix convention; SPICE tools may present them with different signs. Diagonal elements (cgg, cdd) are always positive and need no sign flip. Off-diagonal elements (cgd, cgs, cdg) require negation to match SPICE convention.
+
+- **Testing**: Added `test_ac_caps.py` with `run_ngspice_ac()` helper in `pycmg/testing.py` to verify all 5 capacitance elements across all 5 technologies.
+
+### PMOS Transient Netlist Generation (2026-02-19)
+
+- **Issue**: `run_ngspice_transient()` only generated NMOS-style netlists (drain at Vdd, source at 0V, gate pulse from 0 to Vdd). PMOS requires inverted biasing: drain at 0V, source at Vdd, gate pulse from Vdd to 0V.
+
+- **Fix**: Added `device_type: str = "nmos"` parameter to `run_ngspice_transient()`. When `device_type="pmos"`, the netlist swaps drain/source voltage sources and inverts the gate pulse direction.
+
 ### Multi-Technology Verification & NGSPICE OSDI Limitations (2026-02-14)
 
 - **NGSPICE OSDI does NOT support instance-line parameters**: Unlike HSPICE or Spectre, NGSPICE's OSDI interface cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters (L, TFIN, NFIN) must be **baked into the `.model` block** in the modelcard file.
@@ -323,9 +358,13 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
 - Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
 - Technology registry: `tests/conftest.py` defines 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16).
-- DC Jacobian tests: `tests/test_dc_jacobian.py` parametrized across all 5 technologies.
-- DC Region tests: `tests/test_dc_regions.py` parametrized across all 5 technologies.
-- Transient tests: `tests/test_transient.py` parametrized across all 5 technologies.
+- DC Jacobian tests: `tests/test_dc_jacobian.py` NMOS+PMOS across all 5 technologies.
+- DC Region tests: `tests/test_dc_regions.py` NMOS+PMOS across all 5 technologies, includes gmb.
+- Transient tests: `tests/test_transient.py` NMOS+PMOS across all 5 technologies.
+- AC Capacitance tests: `tests/test_ac_caps.py` NMOS across all 5 technologies.
+- Body bias tests: `tests/test_body_bias.py` NMOS+PMOS across all 5 technologies.
+- Temperature tests: `tests/test_temperature.py` NMOS+PMOS at -40C, 85C, 125C (ASAP7).
+- NFIN scaling tests: `tests/test_nfin_scaling.py` NMOS+PMOS scaling sanity (ASAP7, PyCMG-only).
 - API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
 - Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - C++ OSDI host: `cpp/osdi_host.cpp` exists as reference; Python uses ctypes directly.
@@ -348,9 +387,13 @@ All verification tests use the centralized technology registry in `tests/conftes
 
 | Test File | Coverage | Description |
 |-----------|----------|-------------|
-| `test_dc_jacobian.py` | All 5 techs | DC derivatives (gm, gds, gmb) vs NGSPICE |
-| `test_dc_regions.py` | All 5 techs | DC operating regions (subthreshold, linear, saturation) |
-| `test_transient.py` | All 5 techs | Transient charge/discharge waveforms |
+| `test_dc_jacobian.py` | All 5 techs, NMOS+PMOS | DC derivatives (gm, gds, gmb) vs NGSPICE |
+| `test_dc_regions.py` | All 5 techs, NMOS+PMOS | DC operating regions + gmb verification vs NGSPICE |
+| `test_transient.py` | All 5 techs, NMOS+PMOS | Transient charge/discharge waveforms vs NGSPICE |
+| `test_ac_caps.py` | All 5 techs, NMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
+| `test_body_bias.py` | All 5 techs, NMOS+PMOS | Body bias (Ve != 0) verification vs NGSPICE |
+| `test_temperature.py` | ASAP7, NMOS+PMOS | Temperature (-40C, 85C, 125C) verification vs NGSPICE |
+| `test_nfin_scaling.py` | ASAP7, NMOS+PMOS | NFIN scaling sanity (PyCMG-only, no NGSPICE) |
 | `test_api.py` | Smoke only | Basic functionality, no NGSPICE |
 
 ### Key Implementation Details
@@ -358,6 +401,6 @@ All verification tests use the centralized technology registry in `tests/conftes
 - **Modelcard baking**: `_bake_inst_params_into_modelcard()` in `pycmg/testing.py` injects instance params (L, TFIN, NFIN, DEVTYPE) before the closing `)` of the `.model` block
 - **NGSPICE OSDI limitation**: Cannot accept instance params on device line; must be in `.model` block
 - **PMOS L=16nm caveat**: For TSMC nodes, invalid binning parameters at L=16nm cause NGSPICE convergence failure; use L=20nm for PMOS
-- **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, REL_TOL=5e-3
+- **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, ABS_TOL_C=1e-18 (capacitance), REL_TOL=5e-3, REL_TOL_CAP=1e-2 (1% for capacitance)
 - **DEVTYPE injection**: Automatic injection of devtype=1.0 (NMOS) or devtype=0.0 (PMOS) for models missing this parameter
 - **Sentinel filtering**: TSMC PDK sentinel values (-999*10^n) filtered during naive modelcard generation

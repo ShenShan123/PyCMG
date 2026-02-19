@@ -1547,6 +1547,16 @@ class Instance:
         return c_condensed
 
     def _condense_caps(self) -> Dict[str, float]:
+        """Extract condensed capacitance matrix matching SPICE convention.
+
+        The OSDI reactive Jacobian stores dQ/dV in KCL convention where
+        off-diagonal entries are negative (Y-matrix convention). SPICE
+        capacitance parameters (cgg, cgd, etc.) use the opposite sign for
+        off-diagonal elements: C_ij = -Y_ij/jw for i != j.
+
+        This method negates off-diagonal entries so that output matches
+        NGSPICE's @n1[cXX] operating-point variables.
+        """
         g_full = self._build_full_jacobian(self._sim, self._sim.jacobian_resist)
         c_full = self._build_full_jacobian(self._sim, self._sim.jacobian_react)
         c_condensed = self._condense_capacitance(g_full, c_full,
@@ -1564,13 +1574,16 @@ class Instance:
         d = idx_of("d")
         s = idx_of("s")
         if g >= 0:
+            # Diagonal: direct value (self-capacitance, positive)
             caps["cgg"] = float(c_condensed[g, g])
+            # Off-diagonal: negate to convert from Y-matrix to SPICE cap convention
             if d >= 0:
-                caps["cgd"] = float(c_condensed[g, d])
+                caps["cgd"] = -float(c_condensed[g, d])
             if s >= 0:
-                caps["cgs"] = float(c_condensed[g, s])
+                caps["cgs"] = -float(c_condensed[g, s])
         if d >= 0 and g >= 0:
-            caps["cdg"] = float(c_condensed[d, g])
+            caps["cdg"] = -float(c_condensed[d, g])
+            # Diagonal: direct value
             caps["cdd"] = float(c_condensed[d, d])
         return caps
 

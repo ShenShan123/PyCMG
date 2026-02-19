@@ -26,8 +26,10 @@ NGSPICE_BIN = os.environ.get("NGSPICE_BIN", "/usr/local/ngspice-45.2/bin/ngspice
 ABS_TOL_I = 1e-9      # Current (A)
 ABS_TOL_Q = 1e-18     # Charge (C)
 ABS_TOL_G = 1e-6      # Conductance (S) — Jacobian floor
+ABS_TOL_C = 1e-18     # Capacitance (F)
 REL_TOL = 5e-3        # DC/transient relative (0.5%)
 REL_TOL_JAC = 1e-2    # Jacobian relative (1%) — central finite-difference
+REL_TOL_CAP = 1e-2    # Capacitance relative (1%) — condensation approximation
 
 
 def bake_inst_params(src: Path, dst: Path, model_name: str,
@@ -200,14 +202,111 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
         }
 
 
+def run_ngspice_ac(modelcard: Path, model_name: str, inst_params: Dict[str, Any],
+                   vd: float, vg: float, vs: float = 0.0, ve: float = 0.0,
+                   freq: float = 1e6, temp_c: float = 27.0,
+                   tag: str = "ac") -> Dict[str, float]:
+    """Run NGSPICE AC capacitance extraction and return results.
+
+    Extracts cgg, cgd, cgs, cdg, cdd from NGSPICE operating point variables
+    after a DC solve. NGSPICE OSDI exposes these as @n1[cXX] variables which
+    are computed during the .op analysis (model-internal capacitances condensed
+    to external terminals by NGSPICE).
+
+    Args:
+        modelcard: Path to modelcard file
+        model_name: Model name in the modelcard
+        inst_params: Instance parameters to bake
+        vd, vg, vs, ve: Terminal voltages
+        freq: AC frequency in Hz (default 1 MHz) — used for fallback only
+        temp_c: Temperature in Celsius
+        tag: Unique tag for output files (prevents collisions in parallel runs)
+
+    Returns:
+        Dict with keys: cgg, cgd, cgs, cdg, cdd
+    """
+    out_dir = BUILD / "ngspice_eval" / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Bake instance params into modelcard
+    ng_modelcard = out_dir / f"ng_{model_name}.lib"
+    bake_inst_params(modelcard, ng_modelcard, model_name, inst_params)
+
+    net = [
+        "* AC cap extraction",
+        f'.include "{ng_modelcard}"',
+        f".temp {temp_c}",
+        f"Vd d 0 {vd}",
+        f"Vg g 0 {vg}",
+        f"Vs s 0 {vs}",
+        f"Ve e 0 {ve}",
+        f"N1 d g s e {model_name}",
+        ".op",
+        ".end",
+    ]
+
+    out_csv = out_dir / "ng_ac.csv"
+    net_path = out_dir / "netlist.cir"
+    log_path = out_dir / "ng_ac.log"
+    runner_path = out_dir / "runner.cir"
+
+    runner_path.write_text(
+        "* ngspice runner\n"
+        ".control\n"
+        f"osdi {OSDI_PATH}\n"
+        f"source {net_path}\n"
+        "set filetype=ascii\n"
+        "set wr_vecnames\n"
+        ".options saveinternals\n"
+        "run\n"
+        f"wrdata {out_csv} "
+        "@n1[cgg] @n1[cgd] @n1[cgs] @n1[cdg] @n1[cdd]\n"
+        ".endc\n"
+        ".end\n"
+    )
+    net_path.write_text("\n".join(net))
+
+    res = subprocess.run(
+        [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
+        capture_output=True, text=True
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"NGSPICE AC failed (tag={tag}):\n{res.stdout}\n{res.stderr}\n"
+            f"See log: {log_path}"
+        )
+
+    if not out_csv.exists():
+        raise RuntimeError(
+            f"NGSPICE AC produced no output (tag={tag}). "
+            f"@n1[cXX] variables may not be supported. See log: {log_path}"
+        )
+
+    with out_csv.open() as f:
+        csv_lines = f.readlines()
+        if not csv_lines:
+            raise RuntimeError(f"Empty NGSPICE AC output: {out_csv}")
+        headers = csv_lines[0].split()
+        values = [float(x) for x in csv_lines[1].split()]
+        idx_map = {name: i for i, name in enumerate(headers)}
+        return {
+            "cgg": values[idx_map["@n1[cgg]"]],
+            "cgd": values[idx_map["@n1[cgd]"]],
+            "cgs": values[idx_map["@n1[cgs]"]],
+            "cdg": values[idx_map["@n1[cdg]"]],
+            "cdd": values[idx_map["@n1[cdd]"]],
+        }
+
+
 def assert_close(label: str, py_val: float, ng_val: float,
                  abs_tol: Optional[float] = None,
                  rel_tol: float = REL_TOL) -> None:
     """Assert PyCMG and NGSPICE values are within tolerance.
 
     Auto-selects abs_tol based on label if not provided:
-    - Labels containing 'q' → ABS_TOL_Q (1e-18)
-    - Labels containing 'g' (conductance) → ABS_TOL_G (1e-6)
+    - Labels starting with 'q' → ABS_TOL_Q (1e-18)
+    - Labels starting with 'c' → ABS_TOL_C (1e-18)
+    - Labels starting with 'g' or 'd(' (conductance) → ABS_TOL_G (1e-6)
     - Default → ABS_TOL_I (1e-9)
 
     Args:
@@ -221,6 +320,8 @@ def assert_close(label: str, py_val: float, ng_val: float,
         lbl_lower = label.lower().split("/")[-1]
         if lbl_lower.startswith("q"):
             abs_tol = ABS_TOL_Q
+        elif lbl_lower.startswith("c"):
+            abs_tol = ABS_TOL_C
         elif lbl_lower.startswith("g") or lbl_lower.startswith("d("):
             abs_tol = ABS_TOL_G
         else:
@@ -245,8 +346,23 @@ def run_ngspice_transient(modelcard: Path, model_name: str,
                           t_step: float = 10e-12,
                           t_stop: float = 5e-9,
                           temp_c: float = 27.0,
-                          tag: str = "tran") -> Dict[str, np.ndarray]:
+                          tag: str = "tran",
+                          device_type: str = "nmos") -> Dict[str, np.ndarray]:
     """Run NGSPICE transient simulation with pulse stimulus on gate.
+
+    Args:
+        modelcard: Path to modelcard file
+        model_name: Model name in the modelcard
+        inst_params: Instance parameters to bake
+        vdd: Supply voltage
+        t_step: Transient time step
+        t_stop: Transient stop time
+        temp_c: Temperature in Celsius
+        tag: Unique tag for output files
+        device_type: "nmos" or "pmos" — controls bias and pulse polarity
+
+    NMOS: Vd=Vdd, Vs=0, gate pulse 0→Vdd (turns on then off)
+    PMOS: Vd=0, Vs=Vdd, gate pulse Vdd→0 (turns on then off)
 
     Returns dict mapping variable names to numpy arrays:
         'time', 'v(d)', 'v(g)', 'v(s)', 'v(e)',
@@ -262,18 +378,34 @@ def run_ngspice_transient(modelcard: Path, model_name: str,
     width = 2e-9         # 2 ns
     period = 4e-9        # 4 ns
 
-    net = [
-        "* Transient test",
-        f'.include "{ng_modelcard}"',
-        f".temp {temp_c}",
-        f"Vd d 0 {vdd}",
-        f"Vg g 0 PULSE(0 {vdd} 500p {rise_time:.0e} {rise_time:.0e} {width:.0e} {period:.0e})",
-        "Vs s 0 0",
-        "Ve e 0 0",
-        f"N1 d g s e {model_name}",
-        f".tran {t_step:.0e} {t_stop:.0e}",
-        ".end",
-    ]
+    if device_type == "pmos":
+        # PMOS: source at Vdd, drain at 0, gate pulse from Vdd→0→Vdd
+        net = [
+            "* Transient test (PMOS)",
+            f'.include "{ng_modelcard}"',
+            f".temp {temp_c}",
+            "Vd d 0 0",
+            f"Vg g 0 PULSE({vdd} 0 500p {rise_time:.0e} {rise_time:.0e} {width:.0e} {period:.0e})",
+            f"Vs s 0 {vdd}",
+            "Ve e 0 0",
+            f"N1 d g s e {model_name}",
+            f".tran {t_step:.0e} {t_stop:.0e}",
+            ".end",
+        ]
+    else:
+        # NMOS: drain at Vdd, source at 0, gate pulse from 0→Vdd→0
+        net = [
+            "* Transient test",
+            f'.include "{ng_modelcard}"',
+            f".temp {temp_c}",
+            f"Vd d 0 {vdd}",
+            f"Vg g 0 PULSE(0 {vdd} 500p {rise_time:.0e} {rise_time:.0e} {width:.0e} {period:.0e})",
+            "Vs s 0 0",
+            "Ve e 0 0",
+            f"N1 d g s e {model_name}",
+            f".tran {t_step:.0e} {t_stop:.0e}",
+            ".end",
+        ]
 
     raw_path = out_dir / "tran.raw"
     net_path = out_dir / "tran.cir"

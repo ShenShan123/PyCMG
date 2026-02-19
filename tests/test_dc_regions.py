@@ -78,6 +78,7 @@ def test_nmos_dc_region(tech_name: str, region: str):
     # Compare derivatives
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
+    assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
 
     # Compare charges
     assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
@@ -117,6 +118,7 @@ def test_pmos_dc_region(tech_name: str, region: str):
     assert_close(f"{prefix}/is", py["is"], ng["is"])
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
+    assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
 
 
 if __name__ == "__main__":
