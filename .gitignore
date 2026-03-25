@@ -1,5 +1,7 @@
 .worktrees/
 build*/
 __pycache__/
-tech_model_cards/TSMC*/
+# Ignore commercial TSMC PDK modelcards (IP-protected)
 tech_model_cards/TSMC*/*.l
+# But allow naive (generated) modelcards
+!tech_model_cards/TSMC*/naive/
