@@ -38,9 +38,9 @@ pycmg-wrapper/
 │   ├── osdi_host.cpp        # Core host implementation
 │   ├── osdi_cli.cpp         # CLI inspector tool
 │   └── osdi_eval.cpp        # CLI evaluator tool
-├── tests/                    # Test suite (138 tests)
+├── tests/                    # Test suite (266 tests)
 │   ├── __init__.py          # Package init
-│   ├── conftest.py          # Technology registry (5 techs: ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
+│   ├── conftest.py          # Tiered technology registry (5 base + 16 Vt variants = 21 total)
 │   ├── test_api.py          # Public API tests (smoke, basic functionality)
 │   ├── test_ac_caps.py      # AC capacitance verification vs NGSPICE
 │   ├── test_body_bias.py    # Body bias (Ve != 0) verification vs NGSPICE
@@ -48,7 +48,9 @@ pycmg-wrapper/
 │   ├── test_dc_regions.py   # DC operating region tests vs NGSPICE (NMOS+PMOS)
 │   ├── test_nfin_scaling.py # NFIN scaling sanity tests (PyCMG-only)
 │   ├── test_temperature.py  # Temperature verification vs NGSPICE
-│   └── test_transient.py    # Transient waveform verification vs NGSPICE (NMOS+PMOS)
+│   ├── test_transient.py    # Transient waveform verification vs NGSPICE (NMOS+PMOS)
+│   ├── test_transient_vt.py # Transient Vt variant verification vs NGSPICE (NMOS+PMOS)
+│   └── test_vt_variants.py  # Core Vt variant DC verification (lvt/slvt/sram/ulvt/elvt/hvt/lnvt)
 ├── scripts/                  # Utility scripts
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── tech_model_cards/         # Technology model cards
@@ -81,20 +83,24 @@ pycmg-wrapper/
   - Technology modelcard handling
   - Stress testing utilities
 
-* **`tests/conftest.py`**: Technology registry
-  - `TECHNOLOGIES` dict: 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
-  - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params
-  - Provides parametrization for all verification tests
+* **`tests/conftest.py`**: Tiered technology registry
+  - `TECHNOLOGIES` dict (Tier 1): 5 base technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
+  - `CORE_VT_VARIANTS` dict (Tier 2): 16 additional Vt flavors (lvt, slvt, sram, ulvt, elvt, hvt, lnvt)
+  - `ALL_TECHNOLOGIES` dict: Union of Tier 1 + Tier 2 (21 total entries)
+  - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params from ALL_TECHNOLOGIES
+  - `TECH_NAMES` / `CORE_VT_NAMES` / `ALL_TECH_NAMES`: Lists for test parametrization
 
-* **`tests/`**: Test suite (138 tests total)
+* **`tests/`**: Test suite (266 tests total)
   - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
-  - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 technologies
-  - `test_dc_regions.py`: DC operating region tests, NMOS+PMOS across all 5 technologies
-  - `test_transient.py`: Transient waveform verification, NMOS+PMOS across all 5 technologies
+  - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 base technologies
+  - `test_dc_regions.py`: DC operating region tests, NMOS+PMOS across all 5 base technologies
+  - `test_transient.py`: Transient waveform verification, NMOS+PMOS across all 5 base technologies
+  - `test_transient_vt.py`: Transient Vt variant verification, NMOS+PMOS across 16 Vt flavors (32 tests)
   - `test_ac_caps.py`: AC capacitance verification (cgg, cgd, cgs, cdg, cdd) vs NGSPICE
-  - `test_body_bias.py`: Body bias (Ve != 0) verification across all 5 technologies
+  - `test_body_bias.py`: Body bias (Ve != 0) verification across all 5 base technologies
   - `test_temperature.py`: Temperature verification (-40C, 85C, 125C) vs NGSPICE
   - `test_nfin_scaling.py`: NFIN scaling sanity tests (PyCMG-only)
+  - `test_vt_variants.py`: Core Vt variant DC verification, NMOS+PMOS across 16 Vt flavors (96 tests)
 
 ## PyCMG Output Coverage
 
@@ -207,18 +213,25 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     3.  Compare currents ($I_d, I_g$) and Derivatives ($g_m, g_{ds}$) numerically.
     4.  Assert accuracy within accepted tolerance (e.g., `ABS_TOL_I=1e-9`, `REL_TOL=5e-3`).
 * **Test Strategy:**
-    * **Technology Registry** (`tests/conftest.py`): Centralized parametrization across 5 technologies
-      - ASAP7, TSMC5, TSMC7, TSMC12, TSMC16
-      - Each tech has vdd, modelcard paths, instance params
+    * **Technology Registry** (`tests/conftest.py`): Tiered parametrization
+      - Tier 1 (`TECHNOLOGIES`): 5 base technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
+      - Tier 2 (`CORE_VT_VARIANTS`): 16 Vt variants (ASAP7 lvt/slvt/sram, TSMC ulvt/elvt/hvt/lnvt)
+      - Each entry has vdd, modelcard paths, model names, instance params
     * **DC Jacobian tests** (`tests/test_dc_jacobian.py`): Verify DC derivatives vs NGSPICE
-      - Tests all 5 technologies using the registry
+      - Tests all 5 base technologies using Tier 1 registry
       - Covers gm, gds, gmb derivatives
     * **DC Region tests** (`tests/test_dc_regions.py`): DC operating region verification
-      - Tests all 5 technologies using the registry
+      - Tests all 5 base technologies using Tier 1 registry
       - Covers subthreshold, linear, saturation regions
     * **Transient tests** (`tests/test_transient.py`): Transient waveform verification
-      - Tests all 5 technologies using the registry
+      - Tests all 5 base technologies using Tier 1 registry
       - Covers charge/ discharge waveforms
+    * **Transient Vt tests** (`tests/test_transient_vt.py`): Transient waveform verification for Vt variants
+      - Tests all 16 Vt variants using Tier 2 registry
+      - Same methodology as test_transient.py (sequential stepping, quasi-steady comparison)
+    * **Vt Variant tests** (`tests/test_vt_variants.py`): Cross-Vt DC verification
+      - Tests all 16 Vt variants using Tier 2 registry
+      - Covers saturation, linear, subthreshold regions for NMOS+PMOS
     * **API tests** (`tests/test_api.py`): Quick smoke tests
       - Basic functionality verification
       - No NGSPICE comparison (fast execution)
@@ -357,43 +370,70 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - Python ctypes host: `pycmg/ctypes_host.py` exposes `Model`, `Instance`, `eval_dc`, `eval_tran`.
 - Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
 - Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
-- Technology registry: `tests/conftest.py` defines 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16).
-- DC Jacobian tests: `tests/test_dc_jacobian.py` NMOS+PMOS across all 5 technologies.
-- DC Region tests: `tests/test_dc_regions.py` NMOS+PMOS across all 5 technologies, includes gmb.
-- Transient tests: `tests/test_transient.py` NMOS+PMOS across all 5 technologies.
-- AC Capacitance tests: `tests/test_ac_caps.py` NMOS across all 5 technologies.
-- Body bias tests: `tests/test_body_bias.py` NMOS+PMOS across all 5 technologies.
+- Technology registry: `tests/conftest.py` tiered registry with 21 entries (5 base + 16 Vt variants).
+- DC Jacobian tests: `tests/test_dc_jacobian.py` NMOS+PMOS across all 5 base technologies.
+- DC Region tests: `tests/test_dc_regions.py` NMOS+PMOS across all 5 base technologies, includes gmb.
+- Transient tests: `tests/test_transient.py` NMOS+PMOS across all 5 base technologies.
+- Transient Vt tests: `tests/test_transient_vt.py` NMOS+PMOS across 16 Vt flavors.
+- AC Capacitance tests: `tests/test_ac_caps.py` NMOS across all 5 base technologies.
+- Body bias tests: `tests/test_body_bias.py` NMOS+PMOS across all 5 base technologies.
 - Temperature tests: `tests/test_temperature.py` NMOS+PMOS at -40C, 85C, 125C (ASAP7).
 - NFIN scaling tests: `tests/test_nfin_scaling.py` NMOS+PMOS scaling sanity (ASAP7, PyCMG-only).
+- Vt variant tests: `tests/test_vt_variants.py` NMOS+PMOS across 16 Vt flavors (3 regions each).
 - API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
 - Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - C++ OSDI host: `cpp/osdi_host.cpp` exists as reference; Python uses ctypes directly.
+- Naive modelcard generation: `scripts/generate_naive_tsmc.py` generates all Vt flavors from raw PDKs.
+- **Not yet covered**: I/O voltage-domain devices (1.2V/1.8V), PVT corners (SS/FF), RF variants.
 
 ## Technology Modelcard Verification
 
-All verification tests use the centralized technology registry in `tests/conftest.py`, which parametrizes tests across all 5 technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16) with consistent test coverage.
+All verification tests use the tiered technology registry in `tests/conftest.py`. Tier 1 (`TECHNOLOGIES`) covers 5 base technologies for comprehensive analysis types. Tier 2 (`CORE_VT_VARIANTS`) extends coverage to 16 additional Vt flavors for DC verification.
 
-### Technology Registry Coverage
+### Tier 1: Base Technology Registry (5 entries)
 
 | Technology | Vdd | NMOS Modelcard | PMOS Modelcard | NMOS L | PMOS L |
 |------------|-----|----------------|----------------|--------|--------|
-| ASAP7 | 0.9V | 7nm_TT_160803.pm | 7nm_TT_160803.pm | 7nm | 7nm |
+| ASAP7 | 0.9V | 7nm_TT_160803.pm (rvt) | 7nm_TT_160803.pm (rvt) | 7nm | 7nm |
 | TSMC5 | 0.65V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
 | TSMC7 | 0.75V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
 | TSMC12 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
 | TSMC16 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
 
-### Verification Test Types
+### Tier 2: Core Vt Variants (16 entries)
+
+| Variant | Tech | Vt Flavor | Vdd | NMOS Model | PMOS Model |
+|---------|------|-----------|-----|------------|------------|
+| ASAP7_lvt | ASAP7 | Low Vt | 0.9V | nmos_lvt | pmos_lvt |
+| ASAP7_slvt | ASAP7 | Super-Low Vt | 0.9V | nmos_slvt | pmos_slvt |
+| ASAP7_sram | ASAP7 | SRAM | 0.9V | nmos_sram | pmos_sram |
+| TSMC5_lvt | TSMC5 | Low Vt | 0.65V | nch_lvt_mac | pch_lvt_mac |
+| TSMC5_ulvt | TSMC5 | Ultra-Low Vt | 0.65V | nch_ulvt_mac | pch_ulvt_mac |
+| TSMC5_elvt | TSMC5 | Extreme-Low Vt | 0.65V | nch_elvt_mac | pch_elvt_mac |
+| TSMC7_lvt | TSMC7 | Low Vt | 0.75V | nch_lvt_mac | pch_lvt_mac |
+| TSMC7_ulvt | TSMC7 | Ultra-Low Vt | 0.75V | nch_ulvt_mac | pch_ulvt_mac |
+| TSMC12_lvt | TSMC12 | Low Vt | 0.80V | nch_lvt_mac | pch_lvt_mac |
+| TSMC12_hvt | TSMC12 | High Vt | 0.80V | nch_hvt_mac | pch_hvt_mac |
+| TSMC12_ulvt | TSMC12 | Ultra-Low Vt | 0.80V | nch_ulvt_mac | pch_ulvt_mac |
+| TSMC12_lnvt | TSMC12 | Low-Noise Vt | 0.80V | nch_lnvt_mac | pch_lnvt_mac |
+| TSMC16_lvt | TSMC16 | Low Vt | 0.80V | nch_lvt_mac | pch_lvt_mac |
+| TSMC16_hvt | TSMC16 | High Vt | 0.80V | nch_hvt_mac | pch_hvt_mac |
+| TSMC16_ulvt | TSMC16 | Ultra-Low Vt | 0.80V | nch_ulvt_mac | pch_ulvt_mac |
+| TSMC16_lnvt | TSMC16 | Low-Noise Vt | 0.80V | nch_lnvt_mac | pch_lnvt_mac |
+
+### Verification Test Types (266 tests total)
 
 | Test File | Coverage | Description |
 |-----------|----------|-------------|
-| `test_dc_jacobian.py` | All 5 techs, NMOS+PMOS | DC derivatives (gm, gds, gmb) vs NGSPICE |
-| `test_dc_regions.py` | All 5 techs, NMOS+PMOS | DC operating regions + gmb verification vs NGSPICE |
-| `test_transient.py` | All 5 techs, NMOS+PMOS | Transient charge/discharge waveforms vs NGSPICE |
-| `test_ac_caps.py` | All 5 techs, NMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
-| `test_body_bias.py` | All 5 techs, NMOS+PMOS | Body bias (Ve != 0) verification vs NGSPICE |
+| `test_dc_jacobian.py` | 5 base techs, NMOS+PMOS | DC derivatives (gm, gds, gmb) vs NGSPICE |
+| `test_dc_regions.py` | 5 base techs, NMOS+PMOS | DC operating regions + gmb verification vs NGSPICE |
+| `test_transient.py` | 5 base techs, NMOS+PMOS | Transient charge/discharge waveforms vs NGSPICE |
+| `test_transient_vt.py` | 16 Vt variants, NMOS+PMOS | Transient waveforms vs NGSPICE (32 tests) |
+| `test_ac_caps.py` | 5 base techs, NMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
+| `test_body_bias.py` | 5 base techs, NMOS+PMOS | Body bias (Ve != 0) verification vs NGSPICE |
 | `test_temperature.py` | ASAP7, NMOS+PMOS | Temperature (-40C, 85C, 125C) verification vs NGSPICE |
 | `test_nfin_scaling.py` | ASAP7, NMOS+PMOS | NFIN scaling sanity (PyCMG-only, no NGSPICE) |
+| `test_vt_variants.py` | 16 Vt variants, NMOS+PMOS | DC sat/linear/subthreshold vs NGSPICE (96 tests) |
 | `test_api.py` | Smoke only | Basic functionality, no NGSPICE |
 
 ### Key Implementation Details
@@ -404,3 +444,4 @@ All verification tests use the centralized technology registry in `tests/conftes
 - **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, ABS_TOL_C=1e-18 (capacitance), REL_TOL=5e-3, REL_TOL_CAP=1e-2 (1% for capacitance)
 - **DEVTYPE injection**: Automatic injection of devtype=1.0 (NMOS) or devtype=0.0 (PMOS) for models missing this parameter
 - **Sentinel filtering**: TSMC PDK sentinel values (-999*10^n) filtered during naive modelcard generation
+- **Tiered registry design**: Tier 1 entries use shared param templates with `.copy()` to prevent cross-contamination; Tier 2 uses helper functions (`_asap7_entry`, `_tsmc_entry`) for consistency

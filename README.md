@@ -30,16 +30,17 @@ PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models thr
 - **Full Model Outputs**: 18/18 critical parameters (currents, charges, derivatives, capacitances)
 - **NGSPICE Verification**: Automated comparison against NGSPICE ground truth
 - **Multi-Technology Support**: ASAP7, TSMC5/7/12/16 PDK support
+- **Multi-Vt Coverage**: 21 device variants across 5 process nodes (svt, lvt, ulvt, elvt, hvt, lnvt, slvt, sram)
 
 ### Supported Technologies
 
-| Technology | Node | Status | Vdd |
-|------------|------|--------|-----|
-| ASAP7 | 7nm | Production-ready | 0.90V |
-| TSMC5 | 5nm | Verified | 0.65V |
-| TSMC7 | 7nm | Verified | 0.75V |
-| TSMC12 | 12nm | Verified | 0.80V |
-| TSMC16 | 16nm | Verified | 0.80V |
+| Technology | Node | Vdd | Vt Flavors Verified |
+|------------|------|-----|---------------------|
+| ASAP7 | 7nm | 0.90V | rvt, lvt, slvt, sram |
+| TSMC5 | 5nm | 0.65V | svt, lvt, ulvt, elvt |
+| TSMC7 | 7nm | 0.75V | svt, lvt, ulvt |
+| TSMC12 | 12nm | 0.80V | svt, lvt, hvt, ulvt, lnvt |
+| TSMC16 | 16nm | 0.80V | svt, lvt, hvt, ulvt, lnvt |
 
 ## Quick Start
 
@@ -207,12 +208,18 @@ result = inst.eval_dc({"d": 0.7, "g": 0.5, "s": 0.0, "e": 0.0})
 
 ### Test Categories
 
-| Test File | Description | NGSPICE |
-|-----------|-------------|---------|
-| `test_api.py` | API smoke tests | No |
-| `test_dc_jacobian.py` | DC Jacobian verification | Yes |
-| `test_dc_regions.py` | DC operating region tests | Yes |
-| `test_transient.py` | Transient waveform verification | Yes |
+| Test File | Tests | Description | NGSPICE |
+|-----------|-------|-------------|---------|
+| `test_api.py` | 13 | API smoke tests | No |
+| `test_dc_jacobian.py` | 30 | DC Jacobian verification (5 techs) | Yes |
+| `test_dc_regions.py` | 50 | DC operating region tests (5 techs) | Yes |
+| `test_transient.py` | 10 | Transient waveform verification (5 techs) | Yes |
+| `test_transient_vt.py` | 32 | Transient Vt variant verification (16 variants) | Yes |
+| `test_ac_caps.py` | 5 | AC capacitance verification (5 techs) | Yes |
+| `test_body_bias.py` | 20 | Body bias verification (5 techs) | Yes |
+| `test_temperature.py` | 6 | Temperature sweep verification | Yes |
+| `test_nfin_scaling.py` | 4 | NFIN scaling sanity | No |
+| `test_vt_variants.py` | 96 | Vt variant DC verification (16 variants) | Yes |
 
 ### Quick Tests (No NGSPICE)
 
@@ -224,16 +231,13 @@ pytest tests/test_api.py -v
 ### Integration Tests (NGSPICE Required)
 
 ```bash
-# DC Jacobian verification
-pytest tests/test_dc_jacobian.py -v
+# Base technology verification (5 techs)
+pytest tests/test_dc_jacobian.py tests/test_dc_regions.py tests/test_transient.py -v
 
-# DC operating region tests
-pytest tests/test_dc_regions.py -v
+# Vt variant verification (16 additional Vt flavors)
+pytest tests/test_vt_variants.py -v
 
-# Transient verification
-pytest tests/test_transient.py -v
-
-# All tests
+# All 266 tests
 pytest tests/ -v
 ```
 
@@ -255,12 +259,18 @@ pycmg-wrapper/
 │   ├── __init__.py          # Public API exports
 │   ├── ctypes_host.py       # Core OSDI interface
 │   └── testing.py           # Verification utilities
-├── tests/                    # Test suite
-│   ├── conftest.py          # Technology registry (ASAP7, TSMC5/7/12/16)
+├── tests/                    # Test suite (266 tests)
+│   ├── conftest.py          # Tiered technology registry (21 entries)
 │   ├── test_api.py          # API smoke tests
 │   ├── test_dc_jacobian.py  # DC Jacobian verification
 │   ├── test_dc_regions.py   # DC operating region tests
-│   └── test_transient.py    # Transient waveform verification
+│   ├── test_transient.py    # Transient waveform verification
+│   ├── test_transient_vt.py # Transient Vt variant verification
+│   ├── test_ac_caps.py      # AC capacitance verification
+│   ├── test_body_bias.py    # Body bias verification
+│   ├── test_temperature.py  # Temperature sweep verification
+│   ├── test_nfin_scaling.py # NFIN scaling sanity
+│   └── test_vt_variants.py  # Vt variant DC verification (16 variants)
 ├── tech_model_cards/         # Technology model cards
 │   ├── ASAP7/               # ASAP7 model files
 │   ├── TSMC5/               # TSMC5 model files
@@ -343,6 +353,7 @@ The OSDI binary is the single source of truth for all model physics calculations
 | Current (A) | 1e-9 | 0.5% |
 | Charge (C) | 1e-18 | 0.5% |
 | Conductance (S) | 1e-6 | 1% |
+| Capacitance (F) | 1e-18 | 1% |
 
 ## License
 
