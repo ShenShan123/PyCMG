@@ -106,7 +106,7 @@ pycmg-wrapper/
 
 PyCMG provides comprehensive model outputs covering currents, derivatives, charges, and capacitances. All outputs are verified against NGSPICE using the exact same OSDI binary.
 
-### Supported Outputs (18 total)
+### Supported Outputs (17 total)
 
 | Category | Outputs | Description |
 |----------|---------|-------------|
@@ -120,7 +120,7 @@ PyCMG provides comprehensive model outputs covering currents, derivatives, charg
 - **ids**: Drain-source current computed as `Id - Is` for common-source configuration
 - **All outputs verified** against NGSPICE ground truth using same OSDI binary
 - **Capacitance condensation**: Full internal capacitance matrix reduced to terminal terminals
-- **Full coverage**: 18/18 critical model outputs implemented and tested
+- **Full coverage**: 17/17 critical model outputs implemented and tested
 
 ### Return Values
 
