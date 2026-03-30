@@ -15,8 +15,147 @@ Usage::
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
+
+from pycmg.parser import parse_number_with_suffix
+
+# Project root for resolving relative modelcard/pdk paths
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Regex for key=value assignments in SPICE model blocks
+_ASSIGN_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"([+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)"
+)
+
+
+def _resolve_path(rel_path: str) -> Path:
+    """Resolve a path that may be relative to project root or absolute."""
+    p = Path(rel_path)
+    if p.is_absolute():
+        return p
+    return _PROJECT_ROOT / p
+
+
+def _parse_modelcard_l(modelcard_path: str) -> float:
+    """Extract L from the first .model block in a modelcard file.
+
+    Used for ASAP7-style modelcards where L is a parameter inside the
+    model block (on continuation lines starting with '+').
+
+    Args:
+        modelcard_path: Path to the modelcard file (relative or absolute).
+
+    Returns:
+        Gate length L in meters.
+
+    Raises:
+        RuntimeError: If no L parameter is found in any .model block.
+    """
+    path = _resolve_path(modelcard_path)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    in_model = False
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        if stripped.lower().startswith(".model"):
+            in_model = True
+            continue
+        if in_model and stripped.startswith("+"):
+            content = stripped[1:]
+            for m in _ASSIGN_RE.finditer(content):
+                key = m.group(1).lower()
+                if key == "l":
+                    return parse_number_with_suffix(m.group(2))
+        elif in_model and not stripped.startswith("+"):
+            # End of model block continuation — only check the first block
+            break
+
+    raise RuntimeError(
+        f"No L parameter found in modelcard: {modelcard_path}"
+    )
+
+
+def _scan_pdk_device_min_l(pdk_path: str, device_name: str) -> float:
+    """Scan a TSMC PDK file for the minimum lmin across all numbered variants.
+
+    TSMC PDK files contain numbered model bins like ``nch_svt_mac.1``,
+    ``nch_svt_mac.2``, etc.  Each bin has ``lmin`` and ``lmax`` parameters
+    defining its length range.  This function finds the global minimum
+    ``lmin`` across all numbered variants for the given device.
+
+    The ``lmin`` parameter may appear on the ``.model`` line itself or on
+    continuation lines (starting with ``+``).
+
+    Args:
+        pdk_path: Path to the TSMC PDK file (relative or absolute).
+        device_name: PDK device name, e.g. ``"nch_svt_mac"``.
+
+    Returns:
+        Minimum gate length in meters.
+
+    Raises:
+        RuntimeError: If no numbered variants are found for the device.
+    """
+    path = _resolve_path(pdk_path)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    prefix = f"{device_name.lower()}."
+    all_lmin: list[float] = []
+    idx = 0
+
+    while idx < len(lines):
+        raw = lines[idx]
+        stripped = raw.strip()
+
+        if not stripped or stripped.startswith("*"):
+            idx += 1
+            continue
+
+        if stripped.lower().startswith(".model"):
+            parts = stripped.split()
+            if len(parts) >= 3:
+                model_name = parts[1].lower()
+                if model_name.startswith(prefix):
+                    suffix = model_name[len(prefix):]
+                    if suffix.isdigit():
+                        # Collect all lines of this model block
+                        block_text = stripped
+                        idx += 1
+                        while idx < len(lines):
+                            cont = lines[idx].strip()
+                            if not cont or cont.startswith("*"):
+                                idx += 1
+                                continue
+                            if cont.startswith("+"):
+                                block_text += " " + cont[1:]
+                                idx += 1
+                                continue
+                            break
+                        # Extract lmin from the block
+                        for m in _ASSIGN_RE.finditer(block_text):
+                            if m.group(1).lower() == "lmin":
+                                all_lmin.append(
+                                    parse_number_with_suffix(m.group(2))
+                                )
+                                break
+                        continue  # idx already advanced
+
+        idx += 1
+
+    if not all_lmin:
+        raise RuntimeError(
+            f"No numbered variants found for device '{device_name}' "
+            f"in PDK file: {pdk_path}"
+        )
+    return min(all_lmin)
 
 
 @dataclass
@@ -41,6 +180,39 @@ class DeviceConfig:
     modelcard: Optional[str] = None
     pdk_device: Optional[str] = None
     _min_l: Optional[float] = None
+
+    def get_min_l(self, pdk_path: str | None = None) -> float:
+        """Return minimum gate length for this device, auto-detecting if needed.
+
+        For TSMC devices (pdk_device is set), scans the PDK file for the
+        smallest ``lmin`` across all numbered length variants.  For ASAP7
+        devices (modelcard is set), parses L from the first ``.model`` block.
+
+        The result is cached in ``_min_l`` after the first call.
+
+        Args:
+            pdk_path: Path to TSMC PDK file, required for TSMC devices.
+                Ignored for ASAP7 devices (which use modelcard instead).
+
+        Returns:
+            Minimum gate length in meters.
+
+        Raises:
+            RuntimeError: If min_l cannot be determined (no modelcard,
+                no pdk_device, or missing pdk_path for TSMC device).
+        """
+        if self._min_l is not None:
+            return self._min_l
+        if self.pdk_device is not None and pdk_path is not None:
+            self._min_l = _scan_pdk_device_min_l(pdk_path, self.pdk_device)
+        elif self.modelcard is not None:
+            self._min_l = _parse_modelcard_l(self.modelcard)
+        else:
+            raise RuntimeError(
+                f"Cannot detect min_l for {self.model_name}: "
+                f"no modelcard or pdk_device+pdk_path available"
+            )
+        return self._min_l
 
 
 @dataclass
