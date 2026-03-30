@@ -27,7 +27,7 @@ PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models thr
 - **DC Analysis**: Steady-state I-V characterization
 - **AC Analysis**: Small-signal capacitance extraction
 - **Transient Analysis**: Time-domain simulation with state tracking
-- **Full Model Outputs**: 18/18 critical parameters (currents, charges, derivatives, capacitances)
+- **Full Model Outputs**: 17/17 critical parameters (currents, charges, derivatives, capacitances)
 - **NGSPICE Verification**: Automated comparison against NGSPICE ground truth
 - **Multi-Technology Support**: ASAP7, TSMC5/7/12/16 PDK support
 - **Multi-Vt Coverage**: 21 device variants across 5 process nodes (svt, lvt, ulvt, elvt, hvt, lnvt, slvt, sram)
@@ -47,14 +47,14 @@ PyCMG provides a Python interface to evaluate BSIM-CMG FinFET compact models thr
 ### Step 1: Build OSDI Model
 ```bash
 # From project root
-mkdir -p build-deep-verify && cd build-deep-verify
+mkdir -p build && cd build
 cmake ..
 cmake --build . --target osdi
 ```
 
 Alternatively, compile directly with OpenVAF:
 ```bash
-openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
+openvaf -I bsim-cmg-va/code -o build/osdi/bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 ```
 
 ### Step 2: Run Tests
@@ -79,15 +79,15 @@ pytest tests/ -v
 
 ```bash
 # Using CMake (recommended)
-mkdir -p build-deep-verify && cd build-deep-verify
+mkdir -p build && cd build
 cmake ..
 cmake --build . --target osdi
 
 # Or compile directly with OpenVAF
-openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
+openvaf -I bsim-cmg-va/code -o build/osdi/bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 ```
 
-The output will be at `build-deep-verify/osdi/bsimcmg.osdi`.
+The output will be at `build/osdi/bsimcmg.osdi`.
 
 ### Install Python Dependencies
 
@@ -106,8 +106,8 @@ from pathlib import Path
 from pycmg import Model, Instance
 
 # Paths
-osdi_path = Path("build-deep-verify/osdi/bsimcmg.osdi")
-modelcard_path = Path("tech_model_cards/ASAP7/7nm_TT_160803.pm")
+osdi_path = Path("build/osdi/bsimcmg.osdi")
+modelcard_path = Path("modelcards/ASAP7/7nm_TT_160803.pm")
 
 # Load model from modelcard
 model = Model(
@@ -220,6 +220,7 @@ result = inst.eval_dc({"d": 0.7, "g": 0.5, "s": 0.0, "e": 0.0})
 | `test_temperature.py` | 6 | Temperature sweep verification | Yes |
 | `test_nfin_scaling.py` | 4 | NFIN scaling sanity | No |
 | `test_vt_variants.py` | 96 | Vt variant DC verification (16 variants) | Yes |
+| `test_tech.py` | 27 | Technology registry and config tests | No |
 
 ### Quick Tests (No NGSPICE)
 
@@ -237,7 +238,7 @@ pytest tests/test_dc_jacobian.py tests/test_dc_regions.py tests/test_transient.p
 # Vt variant verification (16 additional Vt flavors)
 pytest tests/test_vt_variants.py -v
 
-# All 266 tests
+# All 293 tests
 pytest tests/ -v
 ```
 
@@ -257,10 +258,14 @@ export ASAP7_MODELCARD=/path/to/modelcard.pm
 pycmg-wrapper/
 ├── pycmg/                    # Python package
 │   ├── __init__.py          # Public API exports
-│   ├── ctypes_host.py       # Core OSDI interface
-│   └── testing.py           # Verification utilities
-├── tests/                    # Test suite (266 tests)
+│   ├── osdi_types.py        # OSDI constants, ctypes structures
+│   ├── core.py              # Low-level OSDI interface (OsdiLibrary, OsdiModel, etc.)
+│   ├── parser.py            # Modelcard and parameter parsing
+│   ├── model.py             # Public API (Model, Instance, eval_dc, eval_tran)
+│   └── tech.py              # Technology registry (DeviceConfig, TechConfig)
+├── tests/                    # Test suite (293 tests)
 │   ├── conftest.py          # Tiered technology registry (21 entries)
+│   ├── helpers.py           # NGSPICE runner helpers, comparison functions
 │   ├── test_api.py          # API smoke tests
 │   ├── test_dc_jacobian.py  # DC Jacobian verification
 │   ├── test_dc_regions.py   # DC operating region tests
@@ -270,21 +275,20 @@ pycmg-wrapper/
 │   ├── test_body_bias.py    # Body bias verification
 │   ├── test_temperature.py  # Temperature sweep verification
 │   ├── test_nfin_scaling.py # NFIN scaling sanity
-│   └── test_vt_variants.py  # Vt variant DC verification (16 variants)
-├── tech_model_cards/         # Technology model cards
+│   ├── test_vt_variants.py  # Vt variant DC verification (16 variants)
+│   └── test_tech.py         # Technology registry tests
+├── modelcards/               # Technology model cards
 │   ├── ASAP7/               # ASAP7 model files
 │   ├── TSMC5/               # TSMC5 model files
 │   ├── TSMC7/               # TSMC7 model files
 │   ├── TSMC12/              # TSMC12 model files
 │   └── TSMC16/              # TSMC16 model files
-├── cpp/                      # C++ OSDI host (reference implementation)
 ├── bsim-cmg-va/             # Verilog-A source and documentation
 ├── scripts/                  # Utility scripts
 │   └── generate_naive_tsmc.py
-├── build-deep-verify/        # Build artifacts
-│   └── osdi/bsimcmg.osdi    # Compiled OSDI binary
-├── CMakeLists.txt            # Build system
-└── main.py                   # CLI entrypoint
+├── build/                    # Build artifacts
+│   └── osdi/bsimcmg.osdi   # Compiled OSDI binary
+└── CMakeLists.txt            # Build system
 ```
 
 ## API Reference
@@ -323,7 +327,7 @@ Create a device instance with geometry parameters.
 ### Utility Functions
 
 ```python
-from pycmg.ctypes_host import parse_modelcard, parse_number_with_suffix
+from pycmg.parser import parse_modelcard, parse_number_with_suffix
 
 # Parse SPICE number with suffix
 parse_number_with_suffix("16n")  # -> 16e-9
