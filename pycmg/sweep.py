@@ -7,8 +7,10 @@ technology nodes and device variants.
 
 from __future__ import annotations
 
+import csv
 import fnmatch
 import itertools
+import os
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -450,3 +452,141 @@ def sweep_dc(osdi_path: str, config: SweepConfig, verbose: int = 2) -> SweepResu
             "total_rows": len(data),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# CSV output
+# ---------------------------------------------------------------------------
+
+
+def _format_cell(value: object) -> str:
+    """Format a single cell value for CSV output.
+
+    Strings are written as-is; floats use ``%.6e`` scientific notation.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        return f"{value:.6e}"
+    return str(value)
+
+
+def to_csv(
+    results: SweepResult,
+    output_dir: str,
+    split_by: str = "tech",
+) -> List[str]:
+    """Write SweepResult to CSV files.
+
+    Args:
+        results: Sweep output from :func:`sweep_dc`.
+        output_dir: Directory where CSV files will be written. Created if it
+            does not exist.
+        split_by: How to split data into files:
+            - ``"tech"``: one file per technology (e.g., ``ASAP7_dc.csv``).
+            - ``"device"``: one file per tech+device
+              (e.g., ``ASAP7_nmos_rvt_dc.csv``).
+            - ``"none"``: single file (``training_data_dc.csv``).
+
+    Returns:
+        List of absolute paths to the written CSV files.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Group rows by split key
+    groups: Dict[str, List[list]] = {}
+
+    if split_by == "none":
+        groups["training_data_dc"] = results.data
+    else:
+        for row in results.data:
+            if split_by == "device":
+                key = f"{row[0]}_{row[1]}_dc"
+            else:
+                # Default: split by tech
+                key = f"{row[0]}_dc"
+            groups.setdefault(key, []).append(row)
+
+    written: List[str] = []
+    for name, rows in sorted(groups.items()):
+        filepath = os.path.join(output_dir, f"{name}.csv")
+        with open(filepath, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(results.columns)
+            for row in rows:
+                writer.writerow([_format_cell(v) for v in row])
+        written.append(os.path.abspath(filepath))
+
+    return written
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper
+# ---------------------------------------------------------------------------
+
+
+def generate_dataset(
+    osdi_path: str,
+    techs: Optional[List[str]] = None,
+    devices: Optional[Dict[str, List[str]]] = None,
+    output_dir: str = "./training_data",
+    l_multipliers: Optional[List[float]] = None,
+    nfins: Optional[List[float]] = None,
+    temperatures: Optional[List[float]] = None,
+    vg_points: int = 50,
+    vd_points: int = 50,
+    ve_values: Optional[List[float]] = None,
+    process_vars: Optional[Dict[str, List[float]]] = None,
+    dense_ratio: float = 0.6,
+    split_by: str = "tech",
+    verbose: int = 2,
+) -> List[str]:
+    """Generate training data CSVs from a DC sweep.
+
+    Convenience wrapper that builds a :class:`SweepConfig`, calls
+    :func:`sweep_dc`, and writes the results with :func:`to_csv`.
+
+    Args:
+        osdi_path: Path to the compiled OSDI binary.
+        techs: Technology names to sweep. Defaults to ``["all"]``.
+        devices: Optional per-tech device filter (supports glob patterns).
+        output_dir: Output directory for CSV files.
+        l_multipliers: Gate length multipliers. ``None`` uses SweepConfig defaults.
+        nfins: Fin count values. ``None`` uses SweepConfig defaults.
+        temperatures: Temperatures in Kelvin. ``None`` uses SweepConfig defaults.
+        vg_points: Number of gate voltage grid points.
+        vd_points: Number of drain voltage grid points.
+        ve_values: Body bias voltage magnitudes. ``None`` uses SweepConfig defaults.
+        process_vars: Process variation parameters to sweep.
+        dense_ratio: Fraction of vg_points in the threshold-dense region.
+        split_by: CSV split strategy (``"tech"``, ``"device"``, or ``"none"``).
+        verbose: Verbosity level (0=silent, 1=summary, 2=per-config).
+
+    Returns:
+        List of absolute paths to the written CSV files.
+    """
+    if techs is None:
+        techs = ["all"]
+
+    # Build kwargs, only overriding non-None values so SweepConfig defaults
+    # apply for unspecified parameters.
+    kwargs: Dict[str, object] = {
+        "techs": techs,
+        "devices": devices,
+        "vg_points": vg_points,
+        "vd_points": vd_points,
+        "process_vars": process_vars,
+        "dense_ratio": dense_ratio,
+    }
+    if l_multipliers is not None:
+        kwargs["l_multipliers"] = l_multipliers
+    if nfins is not None:
+        kwargs["nfins"] = nfins
+    if temperatures is not None:
+        kwargs["temperatures"] = temperatures
+    if ve_values is not None:
+        kwargs["ve_values"] = ve_values
+
+    config = SweepConfig(**kwargs)  # type: ignore[arg-type]
+    result = sweep_dc(osdi_path, config, verbose=verbose)
+    return to_csv(result, output_dir, split_by=split_by)

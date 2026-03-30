@@ -187,3 +187,60 @@ def test_sweep_dc_with_process_vars():
     result = sweep_dc(str(OSDI_PATH), config, verbose=0)
     assert "eot" in result.columns
     assert len(result.data) == 3 * 3 * 2  # 3Vg x 3Vd x 2 process combos
+
+
+def test_to_csv_split_by_tech(tmp_path):
+    from pycmg.sweep import SweepResult, to_csv, build_all_columns
+    cols = build_all_columns([])
+    result = SweepResult(
+        columns=cols,
+        data=[
+            ["ASAP7", "nmos_rvt"] + [0.0] * (len(cols) - 2),
+            ["TSMC7", "nmos_svt"] + [0.0] * (len(cols) - 2),
+        ],
+        metadata={},
+    )
+    paths = to_csv(result, str(tmp_path), split_by="tech")
+    assert len(paths) == 2
+    assert any("ASAP7_dc.csv" in p for p in paths)
+    assert any("TSMC7_dc.csv" in p for p in paths)
+    # Verify CSV content
+    import csv
+    with open(paths[0]) as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        assert header[0] == "tech"
+        assert len(header) == len(cols)
+
+
+def test_to_csv_split_by_none(tmp_path):
+    from pycmg.sweep import SweepResult, to_csv, build_all_columns
+    cols = build_all_columns([])
+    result = SweepResult(
+        columns=cols,
+        data=[["ASAP7", "nmos_rvt"] + [0.0] * (len(cols) - 2)],
+        metadata={},
+    )
+    paths = to_csv(result, str(tmp_path), split_by="none")
+    assert len(paths) == 1
+    assert "training_data_dc.csv" in paths[0]
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
+def test_generate_dataset_smoke(tmp_path):
+    from pycmg.sweep import generate_dataset
+    paths = generate_dataset(
+        osdi_path=str(OSDI_PATH),
+        techs=["ASAP7"],
+        devices={"ASAP7": ["nmos_rvt"]},
+        output_dir=str(tmp_path),
+        l_multipliers=[1.0],
+        nfins=[1.0],
+        temperatures=[300.15],
+        vg_points=3,
+        vd_points=3,
+        verbose=0,
+    )
+    assert len(paths) == 1
+    assert Path(paths[0]).exists()
+    assert Path(paths[0]).stat().st_size > 0
