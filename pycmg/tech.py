@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pycmg.parser import parse_number_with_suffix
+from pycmg.parser import (
+    _extract_model_params,
+    _find_length_variant,
+    parse_number_with_suffix,
+)
 
 # Project root for resolving relative modelcard/pdk paths
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -390,3 +395,197 @@ def get_tech_config(name: str) -> TechConfig:
             f"Technology '{name}' not found. Available: {available}"
         )
     return TECH_REGISTRY[name]
+
+
+# ---------------------------------------------------------------------------
+# Naive TSMC modelcard generation (extracted from scripts/generate_naive_tsmc.py)
+# ---------------------------------------------------------------------------
+
+# Parameters that should NOT be included in naive modelcards (instance parameters)
+_INSTANCE_PARAMS = {
+    'l', 'lmin', 'lmax',  # Length parameters
+    'w', 'wmin', 'wmax',  # Width parameters
+    'tfin', 'tfinmin', 'tfinmax',  # Fin thickness
+    'nfin', 'nfinmin', 'nfinmax',  # Fin count
+    'nf', 'nfmulti',  # Number of fingers
+    'multi',  # Multiplier
+}
+
+
+def generate_naive_tsmc_modelcard(
+    pdk_path: str,
+    model_type: str,
+    device_type: str,
+    L: float,
+    output_path: str,
+    tech: str,
+) -> None:
+    """Generate naive TSMC modelcard by merging global + variant parameters.
+
+    Extracts parameters from the full TSMC PDK (which has .global + numbered
+    variant structure) and writes a single ``.model`` block that can be used
+    directly with both PyCMG and NGSPICE+OSDI.
+
+    Instance parameters (L, W, TFIN, NFIN, NF, MULTI) are excluded from the
+    output; they should be supplied in the netlist when instantiating the
+    device.
+
+    Args:
+        pdk_path: Path to full TSMC PDK file (e.g., cln7_1d8_sp_v1d2_2p2.l).
+        model_type: ``"nch"`` for NMOS or ``"pch"`` for PMOS.
+        device_type: Device type suffix (e.g., ``"svt_mac"``, ``"lvt_mac"``).
+        L: Target gate length in meters (e.g., 16e-9).
+        output_path: Output file path.
+        tech: Technology name for header comment (e.g., ``"TSMC7"``).
+
+    Raises:
+        RuntimeError: If no length variant matches *L* in the PDK file.
+    """
+    base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
+
+    # Extract global model parameters (base)
+    expected_type = "nmos" if model_type == "nch" else "pmos"
+    global_params = _extract_model_params(pdk_path, f"{base_name}.global", expected_type)
+
+    # Find which variant matches the L value
+    variant_num = _find_length_variant(pdk_path, base_name, L)
+
+    # Extract variant model parameters
+    variant_params = _extract_model_params(pdk_path, f"{base_name}.{variant_num}", expected_type)
+
+    # Merge: variant overrides global
+    merged_params = {**global_params, **variant_params}
+
+    # Write naive modelcard (PROCESS PARAMETERS ONLY)
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_file, "w") as f:
+        # Header
+        f.write(f"* Naive {tech} {device_type} modelcard for L={L*1e9:.1f}nm\n")
+        f.write(f"* Generated from: {pdk_path}\n")
+        f.write(f"* Device: {base_name}, Variant: .{variant_num}\n")
+        f.write(f"* Process corner: TT (typical)\n")
+        f.write(f"* Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("*\n")
+        f.write("* This is a NAIVE modelcard - single .model definition without subcircuits.\n")
+        f.write("* Instance parameters (L, W, TFIN, NFIN, NF, MULTI) should be provided\n")
+        f.write("* in the netlist when instantiating the device.\n")
+        f.write("*\n")
+
+        # Model definition
+        f.write(f".model {base_name} bsimcmg (\n")
+
+        # Write all PROCESS parameters (not instance parameters!)
+        param_count = 0
+        skipped_sentinels = []
+        for key, val in merged_params.items():
+            # Skip instance parameters
+            if key.lower() in _INSTANCE_PARAMS:
+                continue
+
+            # Skip sentinel values (TSMC PDKs use -999*10^n as "use default" markers)
+            try:
+                fval = float(val)
+                if abs(fval) > 1e9 and str(val).lstrip('-').startswith('999'):
+                    skipped_sentinels.append(f"{key}={val}")
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            # Format parameter line
+            f.write(f"  + {key} = {val}\n")
+            param_count += 1
+
+        f.write(")\n")
+        f.write(f"* Total parameters: {param_count}\n")
+        if skipped_sentinels:
+            f.write(f"* Skipped sentinel values: {', '.join(skipped_sentinels)}\n")
+
+
+# ---------------------------------------------------------------------------
+# resolve_modelcard() — on-the-fly generation with caching
+# ---------------------------------------------------------------------------
+
+
+def resolve_modelcard(
+    device: DeviceConfig,
+    tech: TechConfig,
+    L: float,
+    cache_dir: str = "build/modelcards",
+) -> str:
+    """Resolve a modelcard path for a device at a given gate length.
+
+    For ASAP7 devices (with a static ``modelcard`` attribute), returns the
+    resolved path directly — the same file is used regardless of *L*.
+
+    For TSMC devices (with a ``pdk_device`` attribute), generates a naive
+    modelcard on-the-fly from the full PDK and caches it under *cache_dir*.
+    Subsequent calls with the same device and *L* return the cached file
+    without regeneration.
+
+    Args:
+        device: Device configuration from the technology registry.
+        tech: Technology configuration (provides ``pdk_path`` and ``name``).
+        L: Target gate length in meters (e.g., 16e-9).
+        cache_dir: Directory for cached generated modelcards, resolved
+            relative to the project root.  Defaults to ``"build/modelcards"``.
+
+    Returns:
+        Absolute path to the modelcard file (as a string).
+
+    Raises:
+        ValueError: If *device* has neither ``modelcard`` nor ``pdk_device``.
+        RuntimeError: If *L* falls outside all PDK variant ranges (TSMC only).
+    """
+    # ASAP7: static modelcard, L-independent
+    if device.modelcard is not None:
+        return str(_resolve_path(device.modelcard))
+
+    # TSMC: generate from PDK on-the-fly
+    if device.pdk_device is not None:
+        if tech.pdk_path is None:
+            raise RuntimeError(
+                f"Technology '{tech.name}' has no pdk_path configured "
+                f"but device '{device.model_name}' requires PDK generation"
+            )
+
+        # Resolve cache directory relative to project root
+        cache_root = _resolve_path(cache_dir)
+        tech_cache = cache_root / tech.name
+
+        # Build output filename: {pdk_device}_l{L_nm}nm.l
+        L_nm = int(L * 1e9)
+        filename = f"{device.pdk_device}_l{L_nm}nm.l"
+        output_path = tech_cache / filename
+
+        # Return cached file if it already exists
+        if output_path.exists():
+            return str(output_path)
+
+        # Generate: split pdk_device into model_type and device_type
+        # e.g., "nch_svt_mac" -> model_type="nch", device_type="svt_mac"
+        parts = device.pdk_device.split("_", 1)
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid pdk_device format: '{device.pdk_device}' "
+                f"(expected 'nch_xxx' or 'pch_xxx')"
+            )
+        model_type, device_type = parts[0], parts[1]
+
+        pdk_resolved = str(_resolve_path(tech.pdk_path))
+        generate_naive_tsmc_modelcard(
+            pdk_path=pdk_resolved,
+            model_type=model_type,
+            device_type=device_type,
+            L=L,
+            output_path=str(output_path),
+            tech=tech.name,
+        )
+
+        return str(output_path)
+
+    raise ValueError(
+        f"Device '{device.model_name}' has neither modelcard nor pdk_device "
+        f"configured — cannot resolve modelcard"
+    )

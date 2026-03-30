@@ -130,3 +130,53 @@ def test_min_l_cached():
     l2 = dev.get_min_l()
     assert l1 == l2
     assert dev._min_l is not None
+
+
+# ---------------------------------------------------------------------------
+# resolve_modelcard() tests (Task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_modelcard_asap7():
+    """ASAP7 should return static modelcard path for any L."""
+    from pycmg.tech import TECH_REGISTRY, resolve_modelcard
+    tech = TECH_REGISTRY["ASAP7"]
+    dev = tech.get_device("nmos_rvt")
+    path = resolve_modelcard(dev, tech, 21e-9)
+    assert "7nm_TT_160803.pm" in path
+    # Same modelcard for different L
+    path2 = resolve_modelcard(dev, tech, 42e-9)
+    assert path == path2
+
+
+@pytest.mark.skipif(
+    not (ROOT / "modelcards" / "TSMC7" / "cln7_1d8_sp_v1d2_2p2.l").exists(),
+    reason="TSMC7 PDK missing"
+)
+def test_resolve_modelcard_tsmc_generates(tmp_path):
+    """TSMC should generate modelcard on-the-fly and cache it."""
+    from pycmg.tech import TECH_REGISTRY, resolve_modelcard
+    tech = TECH_REGISTRY["TSMC7"]
+    dev = tech.get_device("nmos_svt")
+    cache = str(tmp_path / "cache")
+
+    path = resolve_modelcard(dev, tech, 16e-9, cache_dir=cache)
+    assert Path(path).exists()
+    assert "nch_svt_mac_l16nm.l" in path
+
+    # Second call should return cached (no regeneration)
+    path2 = resolve_modelcard(dev, tech, 16e-9, cache_dir=cache)
+    assert path == path2
+
+
+@pytest.mark.skipif(
+    not (ROOT / "modelcards" / "TSMC7" / "cln7_1d8_sp_v1d2_2p2.l").exists(),
+    reason="TSMC7 PDK missing"
+)
+def test_resolve_modelcard_tsmc_invalid_l():
+    """TSMC should raise RuntimeError for L outside all variant ranges."""
+    from pycmg.tech import TECH_REGISTRY, resolve_modelcard
+    tech = TECH_REGISTRY["TSMC7"]
+    dev = tech.get_device("nmos_svt")
+    with pytest.raises(RuntimeError, match="No length variant"):
+        resolve_modelcard(dev, tech, 1e-9)  # 1nm is below all bins
