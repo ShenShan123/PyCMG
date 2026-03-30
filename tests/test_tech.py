@@ -28,3 +28,51 @@ def test_instance_model_overrides():
     # Thicker oxide should reduce drain current
     assert abs(result_thick["id"]) < abs(result_base["id"]), \
         f"Thicker EOT should reduce Id: base={result_base['id']:.3e}, thick={result_thick['id']:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# Technology registry tests (pycmg.tech)
+# ---------------------------------------------------------------------------
+
+
+def test_device_config_asap7():
+    from pycmg.tech import TECH_REGISTRY
+    tech = TECH_REGISTRY["ASAP7"]
+    dev = tech.get_device("nmos_rvt")
+    assert dev.modelcard is not None
+    assert dev.pdk_device is None
+    assert "TFIN" in dev.inst_params
+    assert "DEVTYPE" in dev.inst_params
+    assert "L" not in dev.inst_params
+    assert "NFIN" not in dev.inst_params
+
+
+def test_device_config_tsmc():
+    from pycmg.tech import TECH_REGISTRY
+    tech = TECH_REGISTRY["TSMC7"]
+    dev = tech.get_device("nmos_svt")
+    assert dev.modelcard is None
+    assert dev.pdk_device == "nch_svt_mac"
+    assert "TFIN" in dev.inst_params
+    assert "DEVTYPE" in dev.inst_params
+
+
+def test_tech_config_list_devices():
+    from pycmg.tech import TECH_REGISTRY
+    tech = TECH_REGISTRY["ASAP7"]
+    devices = tech.list_devices()
+    assert "nmos_rvt" in devices
+    assert "pmos_rvt" in devices
+    assert len(devices) >= 8
+
+
+def test_tech_registry_all_techs():
+    from pycmg.tech import TECH_REGISTRY, list_techs
+    assert set(list_techs()) >= {"ASAP7", "TSMC5", "TSMC7", "TSMC12", "TSMC16"}
+
+
+def test_tech_config_pdk_path():
+    from pycmg.tech import TECH_REGISTRY
+    assert TECH_REGISTRY["ASAP7"].pdk_path is None
+    assert TECH_REGISTRY["TSMC7"].pdk_path is not None
+    assert "cln7" in TECH_REGISTRY["TSMC7"].pdk_path
