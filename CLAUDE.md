@@ -4,7 +4,7 @@
 Develop a standalone Python interface for the BSIM-CMG Verilog-A model using OpenVAF/OSDI.
 
 ### Verification Strategy
-**PyCMG** wraps the OSDI binary directly via ctypes (`pycmg/ctypes_host.py`), while **NGSPICE** loads the SAME OSDI binary via the `.osdi` command. Tests compare PyCMG output vs NGSPICE output to ensure:
+**PyCMG** wraps the OSDI binary directly via ctypes (`pycmg/core.py`, `pycmg/model.py`), while **NGSPICE** loads the SAME OSDI binary via the `.osdi` command. Tests compare PyCMG output vs NGSPICE output to ensure:
 
 1. **Binary-level consistency**: Both use the identical `bsimcmg.osdi` file
 2. **Ctypes wrapper correctness**: Verifies proper OSDI function calls
@@ -17,7 +17,7 @@ The OSDI binary is the single source of truth for all model physics calculations
 * **OpenVAF Compiler:** `/usr/local/bin/openvaf`
 * **NGSPICE Simulator:** `/usr/local/ngspice-45.2/bin/ngspice`
 * **Build System:** CMake / Make
-* **Python Bindings:** PyBind11
+* **Python Interface:** ctypes (no C++ compilation needed)
 * **Environment Overrides:**
     * `NGSPICE_BIN` to point at a custom NGSPICE binary.
     * `ASAP7_MODELCARD` to point ASAP7 verification at a file or directory.
@@ -31,16 +31,14 @@ pycmg-wrapper/
 │   ├── *.pdf                 # Technical manuals (3 PDFs)
 ├── pycmg/                    # Python package
 │   ├── __init__.py          # Public API exports
-│   ├── ctypes_host.py       # Core OSDI interface (Model, Instance, eval_dc, eval_tran)
-│   └── testing.py           # Verification utilities
-├── cpp/                      # C++ OSDI host (reference, not used by Python ctypes)
-│   ├── osdi_host.h          # Header file
-│   ├── osdi_host.cpp        # Core host implementation
-│   ├── osdi_cli.cpp         # CLI inspector tool
-│   └── osdi_eval.cpp        # CLI evaluator tool
+│   ├── osdi_types.py        # OSDI constants, ctypes structures, function type declarations
+│   ├── core.py              # OsdiLibrary, OsdiModel, OsdiInstance, OsdiSimulation, AlignedBuffer
+│   ├── parser.py            # parse_modelcard, parse_number_with_suffix, ParsedModel, parse_tsmc_pdk
+│   └── model.py             # Model, Instance (public API), eval_dc, eval_tran, get_jacobian_matrix
 ├── tests/                    # Test suite (266 tests)
 │   ├── __init__.py          # Package init
 │   ├── conftest.py          # Tiered technology registry (5 base + 16 Vt variants = 21 total)
+│   ├── helpers.py           # NGSPICE runner helpers, comparison functions, modelcard baking
 │   ├── test_api.py          # Public API tests (smoke, basic functionality)
 │   ├── test_ac_caps.py      # AC capacitance verification vs NGSPICE
 │   ├── test_body_bias.py    # Body bias (Ve != 0) verification vs NGSPICE
@@ -53,7 +51,7 @@ pycmg-wrapper/
 │   └── test_vt_variants.py  # Core Vt variant DC verification (lvt/slvt/sram/ulvt/elvt/hvt/lnvt)
 ├── scripts/                  # Utility scripts
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
-├── tech_model_cards/         # Technology model cards
+├── modelcards/               # Technology model cards
 │   ├── ASAP7/               # ASAP7 PDK model files
 │   ├── TSMC5/               # TSMC5 model files
 │   │   └── naive/           # Pre-baked naive modelcards
@@ -63,25 +61,44 @@ pycmg-wrapper/
 │   │   └── naive/           # Pre-baked naive modelcards
 │   └── TSMC16/              # TSMC16 model files
 │       └── naive/           # Pre-baked naive modelcards
-├── build-deep-verify/        # Build artifacts (generated)
+├── build/                    # Build artifacts (generated)
 │   ├── osdi/                # Compiled .osdi files
 │   └── ngspice_eval/        # Verification outputs
-├── main.py                   # CLI entrypoint for quick test execution
 └── CLAUDE.md                 # This file
 ```
 
 ### Module Organization
-* **`pycmg/ctypes_host.py`**: Core ctypes-based OSDI interface
-  - `Model`: OSDI model wrapper
-  - `Instance`: Device instance with DC/TRAN evaluation
+* **`pycmg/osdi_types.py`**: OSDI constants, ctypes structure definitions, function type declarations
+  - OSDI ABI constants and enums
+  - Ctypes structure wrappers for OSDI descriptors
+  - Function pointer type declarations
+
+* **`pycmg/core.py`**: Low-level OSDI interface
+  - `OsdiLibrary`: OSDI shared library loader
+  - `OsdiModel`: Model descriptor wrapper
+  - `OsdiInstance`: Instance descriptor wrapper
+  - `OsdiSimulation`: Simulation state manager
+  - `AlignedBuffer`: Memory-aligned buffer for OSDI data
+  - `apply_param()`: Parameter application helper
+
+* **`pycmg/parser.py`**: Modelcard and parameter parsing
   - `parse_modelcard()`: Modelcard parser with unit suffix support
   - `parse_number_with_suffix()`: SPICE number parsing (e.g., "1n" -> 1e-9)
+  - `ParsedModel`: Parsed model data container
+  - `parse_tsmc_pdk()`: TSMC PDK parser
 
-* **`pycmg/testing.py`**: Verification and testing utilities
+* **`pycmg/model.py`**: Public API (Model, Instance)
+  - `Model`: OSDI model wrapper (public API)
+  - `Instance`: Device instance with DC/TRAN evaluation
+  - `eval_dc()`: DC operating point evaluation
+  - `eval_tran()`: Transient evaluation
+  - `get_jacobian_matrix()`: Jacobian extraction
+
+* **`tests/helpers.py`**: Verification and testing utilities
   - NGSPICE runner helpers
   - Comparison functions (DC, AC, TRAN)
   - Technology modelcard handling
-  - Stress testing utilities
+  - Modelcard baking for NGSPICE
 
 * **`tests/conftest.py`**: Tiered technology registry
   - `TECHNOLOGIES` dict (Tier 1): 5 base technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
@@ -145,25 +162,17 @@ The Verilog-A source must be compiled to OSDI format using OpenVAF.
 **Prerequisites:**
 - OpenVAF compiler (v23.5.0+): Install from https://github.com/ngspice/openvaf
 - CMake (v3.20+)
-- C++ compiler with C++17 support
-- PyBind11 (for build system, not required for ctypes interface)
 
 **Build Methods:**
 
 **Option A: Manual CMake build (Recommended)**
 ```bash
-# Install pybind11 if not present
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pybind11
-
 # Create build directory
-mkdir -p build-deep-verify
-cd build-deep-verify
+mkdir -p build
+cd build
 
-# Configure CMake (finds pybind11 automatically)
+# Configure CMake
 cmake ..
-
-# Or specify pybind11 path explicitly
-cmake -Dpybind11_DIR=$(python -m pybind11 --cmakedir) ..
 
 # Build OSDI model
 cmake --build . --target osdi
@@ -176,21 +185,13 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 ```
 
 **Verification:**
-- Ensure output file exists: `build-deep-verify/osdi/bsimcmg.osdi`
-- File should be a shared object: `file build-deep-verify/osdi/bsimcmg.osdi`
+- Ensure output file exists: `build/osdi/bsimcmg.osdi`
+- File should be a shared object: `file build/osdi/bsimcmg.osdi`
 - Typical size: ~2-3 MB
 
-**Constraint:** Ensure the output is a standard `.osdi` file compatible with both the custom C++ host and NGSPICE.
+**Constraint:** Ensure the output is a standard `.osdi` file compatible with NGSPICE and the PyCMG ctypes host.
 
-### 2. C++ OSDI Host (PyBind11 Wrapper)
-* **Dynamic Loading:** Load the compiled `.osdi` library using `dlopen`.
-* **Symbol Binding:** Map OSDI standard functions (`create`, `set_param`, `evaluate`).
-* **Derivative Extraction:**
-    * Directly access the Jacobian matrix returned by the OSDI `evaluate` function.
-    * **Strict Rule:** Do not calculate derivatives numerically (finite difference) in Python. Map specific Jacobian indices to model outputs (Gm, Gds, Gmb, etc.).
-* **Memory Management:** Handle instance creation and destruction cleanly.
-
-### 3. Python Interface Layer
+### 2. Python Interface Layer (ctypes-based OSDI host)
 * **A) Model Card Parser:**
     * Read `.lib`, `.l`, etc., files.
     * Extract global model parameters (e.g., `EOT`, `CIGC`).
@@ -201,9 +202,9 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     * Extract instance-specific geometric parameters (e.g., `L`, `TFIN`, `NFIN`).
 * **C) Simulation Conditions:**
     * Parse `.dc` or `.tran` commands to generate input voltage vectors ($V_d, V_g, V_s, V_e$) and temperature settings.
-* **Execution:** Pass combined Model Params + Instance Params + Voltage Vectors to the C++ core.
+* **Execution:** Pass combined Model Params + Instance Params + Voltage Vectors to the OSDI binary via ctypes.
 
-### 4. Verification (NGSPICE Ground Truth)
+### 3. Verification (NGSPICE Ground Truth)
 * **Configuration:**
     * NGSPICE must load the **exact same** `.osdi` file generated in Step 1 using the `.osdi` command. Do NOT use `.hdl`.
     * Do not allow NGSPICE to re-compile the Verilog-A source; it must use the pre-compiled binary to ensure binary-level consistency.
@@ -241,7 +242,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 2.  **Source of Truth:** The OSDI binary is the single source of truth for physics calculations.
 3.  **Data Flow:**
     * *Input:* Text (Netlists/Model Cards) -> Python Parsers -> Float Values.
-    * *Compute:* Float Values -> C++ Wrapper -> OSDI Binary.
+    * *Compute:* Float Values -> ctypes Host (`pycmg/core.py`) -> OSDI Binary.
     * *Output:* OSDI Results (Values + Derivatives) -> Numpy Arrays -> Verification.
 
 ## Other Tips in This Project
@@ -263,7 +264,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ### Capacitance Sign Convention in _condense_caps() (2026-02-19)
 
-- **Bug**: Off-diagonal capacitances (cgd, cgs, cdg) returned by `_condense_caps()` in `pycmg/ctypes_host.py` had the wrong sign, causing mismatches against NGSPICE `@n1[cXX]` operating-point variables.
+- **Bug**: Off-diagonal capacitances (cgd, cgs, cdg) returned by `_condense_caps()` in `pycmg/model.py` (formerly `pycmg/ctypes_host.py`) had the wrong sign, causing mismatches against NGSPICE `@n1[cXX]` operating-point variables.
 
 - **Root cause**: The OSDI reactive Jacobian (dQ/dV) uses **Y-matrix convention**, where off-diagonal entries are negative (e.g., `dQg/dVd < 0`). However, SPICE capacitance variables like `@n1[cgd]` use the **opposite sign convention** for off-diagonals — they report `cgd = -dQg/dVd > 0`. The `_condense_caps()` function was extracting raw matrix entries without applying this sign flip.
 
@@ -280,7 +281,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 - **Lesson**: When extracting small-signal parameters from OSDI Jacobian matrices, always verify sign conventions against NGSPICE. The OSDI binary returns raw matrix entries in Y-matrix convention; SPICE tools may present them with different signs. Diagonal elements (cgg, cdd) are always positive and need no sign flip. Off-diagonal elements (cgd, cgs, cdg) require negation to match SPICE convention.
 
-- **Testing**: Added `test_ac_caps.py` with `run_ngspice_ac()` helper in `pycmg/testing.py` to verify all 5 capacitance elements across all 5 technologies.
+- **Testing**: Added `test_ac_caps.py` with `run_ngspice_ac()` helper in `tests/helpers.py` (formerly `pycmg/testing.py`) to verify all 5 capacitance elements across all 5 technologies.
 
 ### PMOS Transient Netlist Generation (2026-02-19)
 
@@ -292,7 +293,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 - **NGSPICE OSDI does NOT support instance-line parameters**: Unlike HSPICE or Spectre, NGSPICE's OSDI interface cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters (L, TFIN, NFIN) must be **baked into the `.model` block** in the modelcard file.
 
-- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `pycmg/testing.py` inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
+- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `tests/helpers.py` (formerly `pycmg/testing.py`) inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
 
 - **PMOS DEVTYPE in multi-model files**: When a modelcard contains multiple `.model` blocks (e.g., NMOS + PMOS in one file), `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed. Otherwise PMOS inherits DEVTYPE=1 from the first (NMOS) model, causing inverted behavior.
 
@@ -304,7 +305,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 - **TSMC PDK sentinel values**: TSMC PDKs use `-999*10^n` (e.g., `cth0 = -99900000000.0`) as "use default" markers. These extreme values cause OSDI "Parameter CTH0 is out of bounds!" errors during init. **Fix**: `scripts/generate_naive_tsmc.py` filters sentinel values (abs > 1e9 and string starts with "999") during naive modelcard generation. TSMC5 was the only node affected (CTH0 sentinel); TSMC7/12/16 had no sentinels.
 
-- **Multi-node naive modelcard generation**: `scripts/generate_naive_tsmc.py` supports all 4 TSMC FinFET nodes (TSMC5/7/12/16) with `--tech`, `--pdk`, `--output`, `--devices`, `--lengths` arguments. Uses `_extract_model_params()` and `_find_length_variant()` from `pycmg.ctypes_host` to merge `.global` + variant parameters.
+- **Multi-node naive modelcard generation**: `scripts/generate_naive_tsmc.py` supports all 4 TSMC FinFET nodes (TSMC5/7/12/16) with `--tech`, `--pdk`, `--output`, `--devices`, `--lengths` arguments. Uses `_extract_model_params()` and `_find_length_variant()` from `pycmg.parser` (formerly `pycmg.ctypes_host`) to merge `.global` + variant parameters.
 
 ### ASAP7 Deep Dive Analysis (2026-02-13 Round 3)
 - **Critical parameter storage bug**: Both `parse_modelcard()` and `_extract_model_params()` stored parameters with original case (e.g., "EOT", "L", "NFIN") instead of lowercase. This caused parameter lookup failures when the code tried to access them using lowercase comparisons. Fixed by storing all parameters as lowercase: `parsed_params[_to_lower(key)] = parsed`.
@@ -350,7 +351,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ### Documentation (2026-02-13 Round 2)
 - **Temperature units documentation**: Added comprehensive docstrings explaining that ALL temperatures in the module are in KELVIN. Provided conversion formula `temp_K = temp_C + 273.15` and practical examples for common temperatures (-40C, 27C, 85C, 125C).
-- **Accessible documentation**: Users can now access via `help(pycmg.ctypes_host)`, `help(Model)`, `help(Instance)`, etc.
+- **Accessible documentation**: Users can now access via `help(pycmg.model)`, `help(pycmg.core)`, `help(Model)`, `help(Instance)`, etc.
 
 ### Code Quality (2026-02-13 Round 1 & 2)
 - **Duplicate code removal**: Removed 33 lines of duplicate code in `_find_length_variant()` that was processing variants twice.
@@ -366,10 +367,10 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ## Gap Checklist (Inventory vs Workflow)
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
-- C++ OSDI host: implemented in `cpp/osdi_host.cpp`.
-- Python ctypes host: `pycmg/ctypes_host.py` exposes `Model`, `Instance`, `eval_dc`, `eval_tran`.
-- Modelcard parsing: `pycmg/ctypes_host.py` includes SPICE-compatible parser with unit suffix support.
-- Verification utilities: `pycmg/testing.py` provides NGSPICE comparison helpers.
+- Python ctypes host: `pycmg/core.py` (low-level OSDI) + `pycmg/model.py` (public API: `Model`, `Instance`, `eval_dc`, `eval_tran`).
+- OSDI type definitions: `pycmg/osdi_types.py` provides constants and ctypes structure definitions.
+- Modelcard parsing: `pycmg/parser.py` includes SPICE-compatible parser with unit suffix support.
+- Verification utilities: `tests/helpers.py` provides NGSPICE comparison helpers.
 - Technology registry: `tests/conftest.py` tiered registry with 21 entries (5 base + 16 Vt variants).
 - DC Jacobian tests: `tests/test_dc_jacobian.py` NMOS+PMOS across all 5 base technologies.
 - DC Region tests: `tests/test_dc_regions.py` NMOS+PMOS across all 5 base technologies, includes gmb.
@@ -382,7 +383,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - Vt variant tests: `tests/test_vt_variants.py` NMOS+PMOS across 16 Vt flavors (3 regions each).
 - API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
 - Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
-- C++ OSDI host: `cpp/osdi_host.cpp` exists as reference; Python uses ctypes directly.
+- C++ OSDI host: removed (was `cpp/osdi_host.cpp`); Python uses ctypes directly via `pycmg/core.py`.
 - Naive modelcard generation: `scripts/generate_naive_tsmc.py` generates all Vt flavors from raw PDKs.
 - **Not yet covered**: I/O voltage-domain devices (1.2V/1.8V), PVT corners (SS/FF), RF variants.
 
@@ -438,7 +439,7 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 
 ### Key Implementation Details
 
-- **Modelcard baking**: `_bake_inst_params_into_modelcard()` in `pycmg/testing.py` injects instance params (L, TFIN, NFIN, DEVTYPE) before the closing `)` of the `.model` block
+- **Modelcard baking**: `_bake_inst_params_into_modelcard()` in `tests/helpers.py` injects instance params (L, TFIN, NFIN, DEVTYPE) before the closing `)` of the `.model` block
 - **NGSPICE OSDI limitation**: Cannot accept instance params on device line; must be in `.model` block
 - **PMOS L=16nm caveat**: For TSMC nodes, invalid binning parameters at L=16nm cause NGSPICE convergence failure; use L=20nm for PMOS
 - **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, ABS_TOL_C=1e-18 (capacitance), REL_TOL=5e-3, REL_TOL_CAP=1e-2 (1% for capacitance)
