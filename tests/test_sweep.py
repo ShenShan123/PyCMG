@@ -128,3 +128,62 @@ def test_build_all_columns_with_process():
     vg_idx = cols.index("Vg")
     temp_idx = cols.index("temp_K")
     assert temp_idx < eot_idx < vg_idx
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
+def test_sweep_dc_smoke():
+    """Minimal sweep: 1 tech, 1 device, 1 L, 1 NFIN, 1 temp, 5x5 grid."""
+    from pycmg.sweep import SweepConfig, sweep_dc, build_all_columns
+    config = SweepConfig(
+        techs=["ASAP7"],
+        devices={"ASAP7": ["nmos_rvt"]},
+        l_multipliers=[1.0],
+        nfins=[1.0],
+        temperatures=[300.15],
+        vg_points=5,
+        vd_points=5,
+    )
+    result = sweep_dc(str(OSDI_PATH), config, verbose=0)
+    expected_cols = build_all_columns([])
+    assert result.columns == expected_cols
+    assert len(result.data) == 25  # 5 Vg x 5 Vd
+    assert result.data[0][0] == "ASAP7"
+    assert result.data[0][1] == "nmos_rvt"
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
+def test_sweep_dc_pmos_voltages():
+    """PMOS should have Vs=Vdd."""
+    from pycmg.sweep import SweepConfig, sweep_dc
+    config = SweepConfig(
+        techs=["ASAP7"],
+        devices={"ASAP7": ["pmos_rvt"]},
+        l_multipliers=[1.0],
+        nfins=[1.0],
+        temperatures=[300.15],
+        vg_points=3,
+        vd_points=3,
+    )
+    result = sweep_dc(str(OSDI_PATH), config, verbose=0)
+    vs_idx = result.columns.index("Vs")
+    for row in result.data:
+        assert abs(row[vs_idx] - 0.9) < 1e-12
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
+def test_sweep_dc_with_process_vars():
+    """Process variation should multiply config count."""
+    from pycmg.sweep import SweepConfig, sweep_dc
+    config = SweepConfig(
+        techs=["ASAP7"],
+        devices={"ASAP7": ["nmos_rvt"]},
+        l_multipliers=[1.0],
+        nfins=[1.0],
+        temperatures=[300.15],
+        vg_points=3,
+        vd_points=3,
+        process_vars={"eot": [0.9e-9, 1.1e-9]},
+    )
+    result = sweep_dc(str(OSDI_PATH), config, verbose=0)
+    assert "eot" in result.columns
+    assert len(result.data) == 3 * 3 * 2  # 3Vg x 3Vd x 2 process combos

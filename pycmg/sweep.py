@@ -8,6 +8,8 @@ technology nodes and device variants.
 from __future__ import annotations
 
 import fnmatch
+import itertools
+import time
 import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -301,3 +303,150 @@ class SweepResult:
     columns: List[str]
     data: List[list]  # str | float
     metadata: Dict[str, object]
+
+
+# ---------------------------------------------------------------------------
+# Core sweep loop
+# ---------------------------------------------------------------------------
+
+
+def sweep_dc(osdi_path: str, config: SweepConfig, verbose: int = 2) -> SweepResult:
+    """Run a full DC sweep across technologies, devices, and operating conditions.
+
+    Iterates over the Cartesian product of technologies, devices, gate lengths,
+    fin counts, temperatures, process variation combos, body biases, and
+    voltage grid points. At each bias point, ``Instance.eval_dc()`` is called
+    and the result is appended to the output table.
+
+    Args:
+        osdi_path: Path to the compiled OSDI binary (``bsimcmg.osdi``).
+        config: Sweep configuration specifying all parameter ranges.
+        verbose: Verbosity level.
+            0 = silent, 1 = summary only, 2 = per-configuration progress.
+
+    Returns:
+        A :class:`SweepResult` containing the full data table, column names,
+        and metadata about the sweep.
+    """
+    from pycmg.model import Instance, Model
+    from pycmg.tech import TECH_REGISTRY, get_tech_config, resolve_modelcard
+
+    resolved_techs: List[str] = (
+        list(TECH_REGISTRY.keys()) if "all" in config.techs else config.techs
+    )
+
+    # Expand process grid (Cartesian product)
+    if config.process_vars:
+        pkeys = sorted(config.process_vars.keys())
+        process_combos: List[Dict[str, float]] = [
+            dict(zip(pkeys, c))
+            for c in itertools.product(*(config.process_vars[k] for k in pkeys))
+        ]
+    else:
+        pkeys: List[str] = []
+        process_combos = [{}]
+
+    data: List[list] = []
+    columns = build_all_columns(pkeys)
+    count = 0
+
+    for tech_name in resolved_techs:
+        tech = get_tech_config(tech_name)
+        device_list = resolve_devices(config.devices, tech_name, tech)
+
+        for device_name in device_list:
+            device = tech.get_device(device_name)
+            device_type = "nmos" if "nmos" in device_name else "pmos"
+
+            # Per-device min_l auto-detection
+            min_l = device.get_min_l(tech.pdk_path)
+            lengths = [min_l * m for m in config.l_multipliers]
+
+            for L in lengths:
+                try:
+                    modelcard_path = resolve_modelcard(device, tech, L)
+                except (RuntimeError, ValueError) as e:
+                    if verbose >= 2:
+                        print(
+                            f"  Warning: {tech_name} {device_name} "
+                            f"L={L * 1e9:.0f}nm: {e}, skipping"
+                        )
+                    continue
+
+                model = Model(osdi_path, modelcard_path, device.model_name)
+
+                for proc_combo in process_combos:
+                    for nfin in config.nfins:
+                        for temp in config.temperatures:
+                            params = {**device.inst_params, "L": L, "NFIN": nfin}
+                            inst = Instance(
+                                model,
+                                params=params,
+                                temperature=temp,
+                                model_overrides=proc_combo if proc_combo else None,
+                            )
+
+                            t0 = time.time()
+                            vth_mag = find_threshold(
+                                inst, tech.vdd, device_type, config.n_coarse
+                            )
+                            vg_arr, vd_arr = build_voltage_grid(
+                                tech.vdd,
+                                vth_mag,
+                                config.vg_points,
+                                config.vd_points,
+                                config.dense_ratio,
+                            )
+
+                            n_points = 0
+                            for ve in config.ve_values:
+                                for vg_mag in vg_arr:
+                                    for vd_mag in vd_arr:
+                                        nodes = build_nodes(
+                                            vg_mag, vd_mag, ve, tech.vdd, device_type
+                                        )
+                                        result = inst.eval_dc(nodes)
+                                        row: list = [
+                                            tech_name,
+                                            device_name,
+                                            L,
+                                            nfin,
+                                            tech.tfin,
+                                            temp,
+                                            *[proc_combo.get(k, 0.0) for k in pkeys],
+                                            nodes["g"],
+                                            nodes["d"],
+                                            nodes["s"],
+                                            nodes["e"],
+                                            vth_mag,
+                                            *[result[k] for k in OUTPUT_KEYS],
+                                        ]
+                                        data.append(row)
+                                        n_points += 1
+
+                            count += 1
+                            if verbose >= 2:
+                                elapsed = time.time() - t0
+                                proc_str = " ".join(
+                                    f"{k}={v:.2e}" for k, v in proc_combo.items()
+                                )
+                                print(
+                                    f"[{count}] {tech_name} {device_name} "
+                                    f"L={L * 1e9:.0f}nm NFIN={nfin:.0f} "
+                                    f"T={temp - 273.15:.0f}C "
+                                    f"{proc_str} Vth={vth_mag:.3f}V "
+                                    f"{n_points}pts ({elapsed:.1f}s)"
+                                )
+
+    if verbose >= 1:
+        print(f"Done. {len(data)} rows across {count} configurations.")
+
+    return SweepResult(
+        columns=columns,
+        data=data,
+        metadata={
+            "techs": resolved_techs,
+            "total_configs": count,
+            "total_rows": len(data),
+        },
+    )
