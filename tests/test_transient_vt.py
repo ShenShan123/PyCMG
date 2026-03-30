@@ -18,17 +18,9 @@ import pytest
 
 from pycmg.ctypes_host import Model, Instance
 from pycmg.testing import (
-    OSDI_PATH, run_ngspice_transient, assert_close, REL_TOL,
+    OSDI_PATH, run_ngspice_transient, assert_close, get_wave, REL_TOL,
 )
 from tests.conftest import ALL_TECHNOLOGIES, CORE_VT_NAMES, get_tech_modelcard
-
-
-def _get_wave(ng_wave: dict, key_lower: str, n_points: int) -> np.ndarray:
-    """Look up a waveform key case-insensitively."""
-    for k in ng_wave:
-        if k.lower() == key_lower:
-            return ng_wave[k]
-    return np.zeros(n_points)
 
 
 def _run_transient_comparison(
@@ -63,11 +55,11 @@ def _run_transient_comparison(
         pytest.skip(f"Too few time points ({n_points}) from NGSPICE for {tech_name} {device_type}")
 
     # Pre-fetch waveform arrays
-    vd = _get_wave(ng_wave, "v(d)", n_points)
-    vg = _get_wave(ng_wave, "v(g)", n_points)
-    vs = _get_wave(ng_wave, "v(s)", n_points)
-    ve = _get_wave(ng_wave, "v(e)", n_points)
-    ng_id_arr = _get_wave(ng_wave, "i(vd)", n_points)
+    vd = get_wave(ng_wave, "v(d)", n_points)
+    vg = get_wave(ng_wave, "v(g)", n_points)
+    vs = get_wave(ng_wave, "v(s)", n_points)
+    ve = get_wave(ng_wave, "v(e)", n_points)
+    ng_id_arr = get_wave(ng_wave, "i(vd)", n_points)
 
     # Identify quasi-steady points
     vg_threshold_low = 0.05 * vdd

@@ -101,7 +101,8 @@ def test_nmos_dc_jacobian_full_matrix(tech_name: str, op_idx: int):
 
     op_points = get_nmos_jacobian_op_points(tech["vdd"])
     op = op_points[op_idx]
-    op_name = op.pop("name")
+    op_name = op["name"]
+    op = {k: v for k, v in op.items() if k != "name"}
 
     # NGSPICE: numerical Jacobian via central differencing
     ng_J = compute_numerical_jacobian_central(
@@ -141,7 +142,8 @@ def test_pmos_dc_jacobian_full_matrix(tech_name: str, op_idx: int):
 
     op_points = get_pmos_jacobian_op_points(tech["vdd"])
     op = op_points[op_idx]
-    op_name = op.pop("name")
+    op_name = op["name"]
+    op = {k: v for k, v in op.items() if k != "name"}
 
     # NGSPICE: numerical Jacobian via central differencing
     ng_J = compute_numerical_jacobian_central(

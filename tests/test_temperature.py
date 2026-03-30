@@ -63,5 +63,43 @@ def test_temperature(temp_c: float, device: str) -> None:
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
 
 
+TSMC_TECH = "TSMC7"
+TSMC_TEMPS_C = [85.0, 125.0]  # Skip -40C to avoid convergence issues with naive cards
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+@pytest.mark.parametrize("temp_c", TSMC_TEMPS_C)
+@pytest.mark.parametrize("device", ["nmos", "pmos"])
+def test_temperature_tsmc(temp_c: float, device: str) -> None:
+    """Test DC currents match NGSPICE at non-default temperatures for TSMC7."""
+    vdd = TECHNOLOGIES[TSMC_TECH]["vdd"]
+    try:
+        mc_path, model_name, inst_params = get_tech_modelcard(TSMC_TECH, device)
+    except FileNotFoundError:
+        pytest.skip(f"No {device} modelcard for {TSMC_TECH}")
+
+    if device == "nmos":
+        vd, vg, vs, ve = vdd / 2, vdd / 2, 0.0, 0.0
+    else:
+        vd, vg, vs, ve = vdd * 0.3, vdd * 0.3, vdd, vdd
+
+    temp_k = temp_c + 273.15
+    model = Model(str(OSDI_PATH), str(mc_path), model_name)
+    inst = Instance(model, params=inst_params, temperature=temp_k)
+    py = inst.eval_dc({"d": vd, "g": vg, "s": vs, "e": ve})
+
+    ng = run_ngspice_op(
+        mc_path, model_name, inst_params,
+        vd, vg, vs, ve,
+        temp_c=temp_c,
+        tag=f"temp_tsmc7_{device}_{temp_c}",
+    )
+
+    prefix = f"TSMC7/{device}/T{temp_c}"
+    assert_close(f"{prefix}/id", py["id"], ng["id"])
+    assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
+    assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

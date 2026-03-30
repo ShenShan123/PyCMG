@@ -37,38 +37,29 @@ from pathlib import Path
 
 from pycmg.ctypes_host import Model, Instance
 from pycmg.testing import (
-    OSDI_PATH, run_ngspice_transient, assert_close, REL_TOL,
+    OSDI_PATH, run_ngspice_transient, assert_close, get_wave, REL_TOL,
 )
 from tests.conftest import TECHNOLOGIES, TECH_NAMES, get_tech_modelcard
 
 
-def _get_wave(ng_wave: dict, key_lower: str, n_points: int) -> np.ndarray:
-    """Look up a waveform key case-insensitively."""
-    for k in ng_wave:
-        if k.lower() == key_lower:
-            return ng_wave[k]
-    return np.zeros(n_points)
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
-@pytest.mark.parametrize("tech_name", TECH_NAMES)
-def test_nmos_transient_waveform(tech_name: str):
-    """Compare PyCMG transient currents against NGSPICE at solved node voltages.
+def _run_transient_comparison(tech_name: str, device_type: str) -> None:
+    """Run PyCMG vs NGSPICE transient comparison for a given tech/device.
 
     Steps through ALL NGSPICE time points sequentially so PyCMG maintains
     correct charge history. Checks agreement only at quasi-steady-state points
     where gate voltage is approximately constant (transitions skipped).
     """
     tech = TECHNOLOGIES[tech_name]
-    modelcard, model_name, inst_params = get_tech_modelcard(tech_name, "nmos")
+    modelcard, model_name, inst_params = get_tech_modelcard(tech_name, device_type)
     vdd = tech["vdd"]
 
     # Run NGSPICE transient
+    tag_suffix = f"_{device_type}" if device_type != "nmos" else ""
     ng_wave = run_ngspice_transient(
         modelcard, model_name, inst_params, vdd,
         t_step=10e-12, t_stop=5e-9,
-        tag=f"tran_{tech_name}",
+        tag=f"tran_{tech_name}{tag_suffix}",
+        device_type=device_type,
     )
 
     # Validate NGSPICE produced data
@@ -77,20 +68,21 @@ def test_nmos_transient_waveform(tech_name: str):
         if candidate in ng_wave:
             time_key = candidate
             break
+    label = f"{tech_name}" if device_type == "nmos" else f"{tech_name} {device_type.upper()}"
     if time_key is None:
-        pytest.skip(f"NGSPICE transient returned no time vector for {tech_name}")
+        pytest.skip(f"NGSPICE transient returned no time vector for {label}")
 
     times = ng_wave[time_key]
     n_points = len(times)
     if n_points < 10:
-        pytest.skip(f"Too few time points ({n_points}) from NGSPICE for {tech_name}")
+        pytest.skip(f"Too few time points ({n_points}) from NGSPICE for {label}")
 
     # Pre-fetch waveform arrays (case-insensitive lookup)
-    vd = _get_wave(ng_wave, "v(d)", n_points)
-    vg = _get_wave(ng_wave, "v(g)", n_points)
-    vs = _get_wave(ng_wave, "v(s)", n_points)
-    ve = _get_wave(ng_wave, "v(e)", n_points)
-    ng_id_arr = _get_wave(ng_wave, "i(vd)", n_points)
+    vd = get_wave(ng_wave, "v(d)", n_points)
+    vg = get_wave(ng_wave, "v(g)", n_points)
+    vs = get_wave(ng_wave, "v(s)", n_points)
+    ve = get_wave(ng_wave, "v(e)", n_points)
+    ng_id_arr = get_wave(ng_wave, "i(vd)", n_points)
 
     # Identify quasi-steady points: where Vg is near 0 or near Vdd (not transitioning)
     # During pulse edges, dVg/dt is large and PyCMG's simple backward-Euler
@@ -103,7 +95,7 @@ def test_nmos_transient_waveform(tech_name: str):
     steady_indices = steady_indices[steady_indices > 0]
 
     if len(steady_indices) < 5:
-        pytest.skip(f"Too few steady-state points ({len(steady_indices)}) for {tech_name}")
+        pytest.skip(f"Too few steady-state points ({len(steady_indices)}) for {label}")
 
     # Select up to 30 evenly spaced check points from steady-state regions
     n_check = min(30, len(steady_indices))
@@ -117,6 +109,7 @@ def test_nmos_transient_waveform(tech_name: str):
     inst = Instance(model, params=inst_params)
 
     # Step through ALL points sequentially to maintain PyCMG charge history
+    assert_label_prefix = f"{tech_name}/{device_type}" if device_type != "nmos" else tech_name
     mismatches = 0
     n_checked = 0
     for idx in range(1, n_points):
@@ -141,7 +134,7 @@ def test_nmos_transient_waveform(tech_name: str):
             ng_id = float(ng_id_arr[idx])
             try:
                 assert_close(
-                    f"{tech_name}/t={t*1e9:.2f}ns/id",
+                    f"{assert_label_prefix}/t={t*1e9:.2f}ns/id",
                     py["id"], ng_id,
                     rel_tol=REL_TOL,
                 )
@@ -151,7 +144,7 @@ def test_nmos_transient_waveform(tech_name: str):
     # Allow up to 10% of checked points to mismatch
     max_mismatches = max(1, int(n_checked * 0.10))
     assert mismatches <= max_mismatches, (
-        f"{tech_name}: {mismatches}/{n_checked} time points exceeded tolerance "
+        f"{label}: {mismatches}/{n_checked} time points exceeded tolerance "
         f"(max allowed: {max_mismatches})"
     )
 
@@ -159,113 +152,20 @@ def test_nmos_transient_waveform(tech_name: str):
 @pytest.mark.slow
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
 @pytest.mark.parametrize("tech_name", TECH_NAMES)
+def test_nmos_transient_waveform(tech_name: str):
+    """Compare PyCMG transient currents against NGSPICE at solved node voltages."""
+    _run_transient_comparison(tech_name, "nmos")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+@pytest.mark.parametrize("tech_name", TECH_NAMES)
 def test_pmos_transient_waveform(tech_name: str):
-    """Compare PMOS PyCMG transient currents against NGSPICE at solved node voltages.
-
-    PMOS configuration: Vs=Vdd, Vd=0, gate pulse from Vdd→0 (turns on then off).
-    Steps through ALL NGSPICE time points sequentially so PyCMG maintains
-    correct charge history. Checks agreement only at quasi-steady-state points
-    where gate voltage is approximately constant (transitions skipped).
-    """
-    tech = TECHNOLOGIES[tech_name]
-
+    """Compare PMOS PyCMG transient currents against NGSPICE at solved node voltages."""
     try:
-        modelcard, model_name, inst_params = get_tech_modelcard(tech_name, "pmos")
+        _run_transient_comparison(tech_name, "pmos")
     except FileNotFoundError:
         pytest.skip(f"No PMOS modelcard for {tech_name}")
-
-    vdd = tech["vdd"]
-
-    # Run NGSPICE transient with PMOS bias
-    ng_wave = run_ngspice_transient(
-        modelcard, model_name, inst_params, vdd,
-        t_step=10e-12, t_stop=5e-9,
-        tag=f"tran_{tech_name}_pmos",
-        device_type="pmos",
-    )
-
-    # Validate NGSPICE produced data
-    time_key = None
-    for candidate in ["time", "Time", "TIME"]:
-        if candidate in ng_wave:
-            time_key = candidate
-            break
-    if time_key is None:
-        pytest.skip(f"NGSPICE transient returned no time vector for {tech_name} PMOS")
-
-    times = ng_wave[time_key]
-    n_points = len(times)
-    if n_points < 10:
-        pytest.skip(f"Too few time points ({n_points}) from NGSPICE for {tech_name} PMOS")
-
-    # Pre-fetch waveform arrays (case-insensitive lookup)
-    vd = _get_wave(ng_wave, "v(d)", n_points)
-    vg = _get_wave(ng_wave, "v(g)", n_points)
-    vs = _get_wave(ng_wave, "v(s)", n_points)
-    ve = _get_wave(ng_wave, "v(e)", n_points)
-    ng_id_arr = _get_wave(ng_wave, "i(vd)", n_points)
-
-    # Identify quasi-steady points: where Vg is near 0 or near Vdd (not transitioning)
-    # For PMOS, the pulse goes Vdd→0→Vdd, so steady states are near 0 and near Vdd
-    vg_threshold_low = 0.05 * vdd   # Within 5% of ground
-    vg_threshold_high = 0.95 * vdd  # Within 5% of Vdd
-    steady_mask = (vg <= vg_threshold_low) | (vg >= vg_threshold_high)
-    steady_indices = np.where(steady_mask)[0]
-    # Only check indices > 0 (need previous point for delta_t)
-    steady_indices = steady_indices[steady_indices > 0]
-
-    if len(steady_indices) < 5:
-        pytest.skip(f"Too few steady-state points ({len(steady_indices)}) for {tech_name} PMOS")
-
-    # Select up to 30 evenly spaced check points from steady-state regions
-    n_check = min(30, len(steady_indices))
-    check_indices = steady_indices[
-        np.linspace(0, len(steady_indices) - 1, n_check, dtype=int)
-    ]
-    check_set = set(check_indices.tolist())
-
-    # Create PyCMG instance
-    model = Model(str(OSDI_PATH), str(modelcard), model_name)
-    inst = Instance(model, params=inst_params)
-
-    # Step through ALL points sequentially to maintain PyCMG charge history
-    mismatches = 0
-    n_checked = 0
-    for idx in range(1, n_points):
-        t = float(times[idx])
-        t_prev = float(times[idx - 1])
-        delta_t = t - t_prev
-        if delta_t <= 0:
-            delta_t = 1e-14  # Safety floor
-
-        nodes = {
-            "d": float(vd[idx]),
-            "g": float(vg[idx]),
-            "s": float(vs[idx]),
-            "e": float(ve[idx]),
-        }
-
-        py = inst.eval_tran(nodes, time=t, delta_t=delta_t)
-
-        # Only check at quasi-steady-state sample points
-        if idx in check_set:
-            n_checked += 1
-            ng_id = float(ng_id_arr[idx])
-            try:
-                assert_close(
-                    f"{tech_name}/pmos/t={t*1e9:.2f}ns/id",
-                    py["id"], ng_id,
-                    rel_tol=REL_TOL,
-                )
-            except Exception:
-                mismatches += 1
-
-    # Allow up to 10% of checked points to mismatch
-    max_mismatches = max(1, int(n_checked * 0.10))
-    assert mismatches <= max_mismatches, (
-        f"{tech_name} PMOS: {mismatches}/{n_checked} time points exceeded tolerance "
-        f"(max allowed: {max_mismatches})"
-    )
 
 
 if __name__ == "__main__":

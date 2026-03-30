@@ -87,6 +87,12 @@ UINT32_MAX = 0xFFFFFFFF
 
 _INSTANCE_NAME = ctypes.c_char_p(b"osdi_host")
 
+# Module-level regex for SPICE parameter assignment: NAME = VALUE[suffix]
+_ASSIGN_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"([+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)"
+)
+
 
 # ---------------------------------------------------------------------------
 # OSDI ctypes structure definitions
@@ -411,7 +417,7 @@ def _to_lower(s: str) -> str:
 
 
 def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> ParsedModel:
-    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+    assign_re = _ASSIGN_RE
     target_lower = _to_lower(target_model_name) if target_model_name else None
 
     def _parse_params(lines: List[str]) -> Dict[str, float]:
@@ -582,7 +588,7 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
     Raises:
         RuntimeError: If no variant matches the L value
     """
-    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+    assign_re = _ASSIGN_RE
 
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -678,7 +684,7 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
     Raises:
         RuntimeError: If model not found
     """
-    assign_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9eE+\-\.]+[a-zA-Z]*)")
+    assign_re = _ASSIGN_RE
 
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -1342,6 +1348,16 @@ class Model:
             parsed = parse_modelcard(modelcard_path, target)
             self._modelcard_params = dict(parsed.params)
 
+    def __enter__(self) -> "Model":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass  # cleanup handled by GC; explicit close() can be added later
+
+    def close(self) -> None:
+        """Release OSDI resources."""
+        pass  # Placeholder for future explicit cleanup
+
     @property
     def descriptor(self) -> OsdiDescriptor:
         return self._desc
@@ -1392,6 +1408,14 @@ class Instance:
         self._model = model
         self._inst = OsdiInstance(model.descriptor)
         self._temperature = temperature
+        if temperature < 200.0:
+            import warnings
+            warnings.warn(
+                f"Temperature {temperature} K is very low (< 200 K). "
+                f"Did you pass Celsius instead of Kelvin? "
+                f"Use temp_K = temp_C + 273.15 to convert.",
+                stacklevel=2,
+            )
         self._sim = OsdiSimulation()
         self._connected_terminals = int(model.descriptor.num_terminals)
         for key, val in model.modelcard_params.items():
@@ -1407,6 +1431,16 @@ class Instance:
         self._prev_qd = 0.0
         self._prev_qs = 0.0
         self._prev_qb = 0.0
+
+    def __enter__(self) -> "Instance":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def close(self) -> None:
+        """Release instance resources."""
+        pass
 
     def set_params(self, params: Dict[str, float], allow_rebind: bool = False) -> None:
         for key, val in params.items():

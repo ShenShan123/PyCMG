@@ -33,8 +33,8 @@ import pytest
 import pycmg
 from pycmg.ctypes_host import Model, Instance, parse_modelcard, parse_number_with_suffix
 
+from tests.conftest import OSDI_PATH
 ROOT = Path(__file__).resolve().parents[1]
-OSDI_PATH = ROOT / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
 BUILD = ROOT / "build-deep-verify"
 
 # ASAP7 modelcard configuration
@@ -349,6 +349,141 @@ def test_get_jacobian_matrix():
         # gds = dId/dVd should be positive in saturation
         # (terminal ordering from sim.terminal_indices)
         assert J.sum() != 0.0, "Jacobian is all zeros"
+    finally:
+        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
+            Path(modelcard_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Negative / error tests
+# ---------------------------------------------------------------------------
+
+def test_parse_number_edge_cases() -> None:
+    """Test parse_number_with_suffix with edge-case inputs."""
+    parse = parse_number_with_suffix
+
+    # Negative numbers
+    assert parse("-1.5") == -1.5
+    assert parse("-3e-9") == -3e-9
+
+    # Zero
+    assert parse("0") == 0.0
+    assert parse("0.0") == 0.0
+
+    # Large scientific notation
+    assert parse("1e+22") == pytest.approx(1e22)
+    assert parse("1.00E+22") == pytest.approx(1e22)
+
+    # Suffix with scientific notation should be unusual but parseable
+    assert parse("1.5e-9") == pytest.approx(1.5e-9)
+
+
+def test_parse_modelcard_empty_file(tmp_path) -> None:
+    """Test parse_modelcard with empty file raises RuntimeError."""
+    card = tmp_path / "empty.lib"
+    card.write_text("")
+    with pytest.raises(RuntimeError, match="no .* model found"):
+        parse_modelcard(str(card))
+
+
+def test_parse_modelcard_no_valid_model(tmp_path) -> None:
+    """Test parse_modelcard with file containing no valid BSIM-CMG model."""
+    card = tmp_path / "invalid.lib"
+    card.write_text("""
+* Only comments
+* No .model blocks
++ some continuation line
+""")
+    with pytest.raises(RuntimeError, match="no .* model found"):
+        parse_modelcard(str(card))
+
+
+def test_parse_modelcard_wrong_target(tmp_path) -> None:
+    """Test parse_modelcard when target model name doesn't exist."""
+    card = tmp_path / "test.lib"
+    card.write_text("""
+.model nmos1 bsimcmg l=16n
+""")
+    with pytest.raises(RuntimeError, match="no nonexistent model found"):
+        parse_modelcard(str(card), target_model_name="nonexistent")
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def test_eval_dc_multiple_calls_consistent() -> None:
+    """Verify that calling eval_dc multiple times on the same Instance gives consistent results."""
+    modelcard_path, model_name = _get_test_modelcard()
+    try:
+        model = Model(str(OSDI_PATH), modelcard_path, model_name)
+        inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
+
+        nodes = {"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0}
+        r1 = inst.eval_dc(nodes)
+        r2 = inst.eval_dc(nodes)
+
+        # Results should be identical (no stale state)
+        for key in r1:
+            assert r1[key] == pytest.approx(r2[key], abs=1e-20), (
+                f"Inconsistent {key}: {r1[key]} vs {r2[key]}"
+            )
+    finally:
+        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
+            Path(modelcard_path).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def test_eval_dc_different_bias_points() -> None:
+    """Verify eval_dc works at different bias points on the same Instance."""
+    modelcard_path, model_name = _get_test_modelcard()
+    try:
+        model = Model(str(OSDI_PATH), modelcard_path, model_name)
+        inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
+
+        # Saturation
+        r_sat = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+        assert abs(r_sat["id"]) > 1e-12, "No current in saturation"
+
+        # Off state
+        r_off = inst.eval_dc({"d": 0.5, "g": 0.0, "s": 0.0, "e": 0.0})
+        # Off current should be much smaller than saturation current
+        assert abs(r_off["id"]) < abs(r_sat["id"]), "Off current >= saturation current"
+
+        # Linear region
+        r_lin = inst.eval_dc({"d": 0.1, "g": 0.8, "s": 0.0, "e": 0.0})
+        assert abs(r_lin["id"]) > 1e-12, "No current in linear"
+    finally:
+        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
+            Path(modelcard_path).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def test_eval_tran_negative_delta_t() -> None:
+    """Verify eval_tran raises on negative delta_t."""
+    modelcard_path, model_name = _get_test_modelcard()
+    try:
+        model = Model(str(OSDI_PATH), modelcard_path, model_name)
+        inst = Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0})
+
+        with pytest.raises(RuntimeError, match="delta_t must be positive"):
+            inst.eval_tran(
+                nodes={"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0},
+                time=1e-9,
+                delta_t=-1e-12,
+            )
+    finally:
+        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
+            Path(modelcard_path).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def test_context_manager() -> None:
+    """Test that Model and Instance support context manager protocol."""
+    modelcard_path, model_name = _get_test_modelcard()
+    try:
+        with Model(str(OSDI_PATH), modelcard_path, model_name) as model:
+            assert model is not None
+            with Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0}) as inst:
+                result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
+                assert "id" in result
     finally:
         if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
             Path(modelcard_path).unlink(missing_ok=True)

@@ -65,6 +65,11 @@ def test_nmos_body_bias(tech_name: str, bias_type: str) -> None:
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
     assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
+    # Bulk terminal current — primary output affected by body bias
+    assert_close(f"{prefix}/ie", py["ie"], ng["ie"])
+    # Charges
+    assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
+    assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
 
 
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
@@ -109,6 +114,11 @@ def test_pmos_body_bias(tech_name: str, bias_type: str) -> None:
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
     assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
+    # Bulk terminal current — primary output affected by body bias
+    assert_close(f"{prefix}/ie", py["ie"], ng["ie"])
+    # Charges
+    assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
+    assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
 
 
 if __name__ == "__main__":

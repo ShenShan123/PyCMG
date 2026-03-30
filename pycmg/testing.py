@@ -170,10 +170,15 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
     )
     net_path.write_text("\n".join(net))
 
-    res = subprocess.run(
-        [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
-        capture_output=True, text=True
-    )
+    try:
+        res = subprocess.run(
+            [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"NGSPICE timed out after 120s (tag={tag}). See log: {log_path}"
+        )
     if res.returncode != 0:
         raise RuntimeError(
             f"NGSPICE failed (tag={tag}):\n{res.stdout}\n{res.stderr}\n"
@@ -204,7 +209,7 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
 
 def run_ngspice_ac(modelcard: Path, model_name: str, inst_params: Dict[str, Any],
                    vd: float, vg: float, vs: float = 0.0, ve: float = 0.0,
-                   freq: float = 1e6, temp_c: float = 27.0,
+                   temp_c: float = 27.0,
                    tag: str = "ac") -> Dict[str, float]:
     """Run NGSPICE AC capacitance extraction and return results.
 
@@ -218,7 +223,6 @@ def run_ngspice_ac(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
         model_name: Model name in the modelcard
         inst_params: Instance parameters to bake
         vd, vg, vs, ve: Terminal voltages
-        freq: AC frequency in Hz (default 1 MHz) — used for fallback only
         temp_c: Temperature in Celsius
         tag: Unique tag for output files (prevents collisions in parallel runs)
 
@@ -266,10 +270,15 @@ def run_ngspice_ac(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
     )
     net_path.write_text("\n".join(net))
 
-    res = subprocess.run(
-        [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
-        capture_output=True, text=True
-    )
+    try:
+        res = subprocess.run(
+            [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"NGSPICE timed out after 120s (tag={tag}). See log: {log_path}"
+        )
     if res.returncode != 0:
         raise RuntimeError(
             f"NGSPICE AC failed (tag={tag}):\n{res.stdout}\n{res.stderr}\n"
@@ -341,6 +350,15 @@ def assert_close(label: str, py_val: float, ng_val: float,
     )
 
 
+def get_wave(ng_wave: Dict[str, np.ndarray], key_lower: str,
+             n_points: int) -> np.ndarray:
+    """Look up a waveform key case-insensitively in NGSPICE output."""
+    for k in ng_wave:
+        if k.lower() == key_lower:
+            return ng_wave[k]
+    return np.zeros(n_points)
+
+
 def run_ngspice_transient(modelcard: Path, model_name: str,
                           inst_params: Dict[str, Any], vdd: float,
                           t_step: float = 10e-12,
@@ -368,6 +386,9 @@ def run_ngspice_transient(modelcard: Path, model_name: str,
         'time', 'v(d)', 'v(g)', 'v(s)', 'v(e)',
         'i(vd)', 'i(vg)', 'i(vs)', 'i(ve)'
     """
+    if device_type not in ("nmos", "pmos"):
+        raise ValueError(f"device_type must be 'nmos' or 'pmos', got {device_type!r}")
+
     out_dir = BUILD / "ngspice_eval" / tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -425,10 +446,15 @@ def run_ngspice_transient(modelcard: Path, model_name: str,
     )
     net_path.write_text("\n".join(net))
 
-    res = subprocess.run(
-        [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
-        capture_output=True, text=True
-    )
+    try:
+        res = subprocess.run(
+            [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"NGSPICE timed out after 120s (tag={tag}). See log: {log_path}"
+        )
     if res.returncode != 0:
         raise RuntimeError(
             f"NGSPICE transient failed (tag={tag}):\n{res.stdout}\n{res.stderr}\n"

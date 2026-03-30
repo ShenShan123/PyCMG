@@ -25,7 +25,7 @@ import pytest
 from pycmg import Model, Instance
 from tests.conftest import get_tech_modelcard, TECHNOLOGIES
 
-OSDI_PATH = Path(__file__).resolve().parents[1] / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
+from pycmg.testing import OSDI_PATH
 TECH = "ASAP7"
 
 

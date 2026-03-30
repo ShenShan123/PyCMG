@@ -83,6 +83,8 @@ def test_nmos_dc_region(tech_name: str, region: str):
     # Compare charges
     assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
     assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
+    assert_close(f"{prefix}/qs", py["qs"], ng["qs"])
+    assert_close(f"{prefix}/qb", py["qb"], ng["qb"])
 
 
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
@@ -119,6 +121,11 @@ def test_pmos_dc_region(tech_name: str, region: str):
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
     assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
+    # Charges
+    assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
+    assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
+    assert_close(f"{prefix}/qs", py["qs"], ng["qs"])
+    assert_close(f"{prefix}/qb", py["qb"], ng["qb"])
 
 
 if __name__ == "__main__":

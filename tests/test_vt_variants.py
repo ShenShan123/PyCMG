@@ -92,6 +92,8 @@ def _compare_dc(
     # Charges
     assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
     assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
+    assert_close(f"{prefix}/qs", py["qs"], ng["qs"])
+    assert_close(f"{prefix}/qb", py["qb"], ng["qb"])
 
 
 # ---------------------------------------------------------------------------
