@@ -19,8 +19,8 @@ Key Design Decisions:
 Usage:
     python scripts/generate_naive_tsmc.py \
         --tech TSMC7 \
-        --pdk tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2.l \
-        --output tech_model_cards/TSMC7/naive/ \
+        --pdk modelcards/TSMC7/cln7_1d8_sp_v1d2_2p2.l \
+        --output modelcards/TSMC7/naive/ \
         --devices nch_svt_mac,nch_lvt_mac,nch_ulvt_mac,pch_svt_mac \
         --lengths 16e-9,20e-9,24e-9
 """
@@ -34,7 +34,7 @@ from typing import List
 # Add parent directory to path to import from pycmg
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pycmg.ctypes_host import _extract_model_params, _find_length_variant, parse_number_with_suffix
+from pycmg.parser import _extract_model_params, _find_length_variant, parse_number_with_suffix
 
 
 # Parameters that should NOT be included in naive modelcards (instance parameters)
@@ -207,16 +207,16 @@ Examples:
   # Generate TSMC7 modelcards
   python scripts/generate_naive_tsmc.py \
       --tech TSMC7 \
-      --pdk tech_model_cards/TSMC7/cln7_1d8_sp_v1d2_2p2.l \
-      --output tech_model_cards/TSMC7/naive/ \
+      --pdk modelcards/TSMC7/cln7_1d8_sp_v1d2_2p2.l \
+      --output modelcards/TSMC7/naive/ \
       --devices nch_svt_mac \
       --lengths 16e-9
 
   # Batch generate multiple devices/lengths for TSMC5
   python scripts/generate_naive_tsmc.py \
       --tech TSMC5 \
-      --pdk tech_model_cards/TSMC5/cln5_1d2_sp_v1d2_2p2.l \
-      --output tech_model_cards/TSMC5/naive/ \
+      --pdk modelcards/TSMC5/cln5_1d2_sp_v1d2_2p2.l \
+      --output modelcards/TSMC5/naive/ \
       --devices nch_svt_mac,nch_lvt_mac,pch_svt_mac,pch_lvt_mac \
       --lengths 16e-9,20e-9,24e-9
         """

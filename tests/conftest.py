@@ -19,7 +19,7 @@ from typing import Any, Dict, Tuple
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OSDI_PATH = ROOT / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
+OSDI_PATH = ROOT / "build" / "osdi" / "bsimcmg.osdi"
 
 # ---------------------------------------------------------------------------
 # Helper: TSMC instance param templates (same geometry within a tech node)
@@ -64,7 +64,7 @@ def _tsmc_entry(
 # ---------------------------------------------------------------------------
 #
 # Each entry specifies:
-#   dir:          subdirectory under tech_model_cards/
+#   dir:          subdirectory under modelcards/
 #   vdd:          core supply voltage (V)
 #   nmos_file:    exact modelcard filename for NMOS
 #   pmos_file:    exact modelcard filename for PMOS
@@ -158,7 +158,7 @@ def get_tech_modelcard(tech_name: str, device_type: str = "nmos") -> Tuple[Path,
         Tuple of (modelcard_path, model_name, inst_params)
     """
     tech = ALL_TECHNOLOGIES[tech_name]
-    tech_dir = ROOT / "tech_model_cards" / tech["dir"]
+    tech_dir = ROOT / "modelcards" / tech["dir"]
 
     file_key = f"{device_type}_file"
     model_key = f"{device_type}_model"

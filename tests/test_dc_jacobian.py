@@ -17,8 +17,8 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from pycmg.ctypes_host import Model, Instance
-from pycmg.testing import (
+from pycmg import Model, Instance
+from tests.helpers import (
     OSDI_PATH, run_ngspice_op, assert_close,
     ABS_TOL_G, REL_TOL_JAC,
 )

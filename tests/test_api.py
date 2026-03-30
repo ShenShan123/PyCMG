@@ -31,14 +31,14 @@ import numpy as np
 import pytest
 
 import pycmg
-from pycmg.ctypes_host import Model, Instance, parse_modelcard, parse_number_with_suffix
+from pycmg import Model, Instance, parse_modelcard, parse_number_with_suffix
 
 from tests.conftest import OSDI_PATH
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "build-deep-verify"
+BUILD = ROOT / "build"
 
 # ASAP7 modelcard configuration
-ASAP7_DIR = ROOT / "tech_model_cards" / "ASAP7"
+ASAP7_DIR = ROOT / "modelcards" / "ASAP7"
 ASAP7_MODELCARD_OVERRIDE = os.environ.get("ASAP7_MODELCARD")
 
 
@@ -128,8 +128,8 @@ def test_import() -> None:
     """Test that pycmg module can be imported."""
     assert hasattr(pycmg, "Model")
     assert hasattr(pycmg, "Instance")
-    assert hasattr(pycmg.ctypes_host, "parse_modelcard")
-    assert hasattr(pycmg.ctypes_host, "parse_number_with_suffix")
+    assert hasattr(pycmg, "parse_modelcard")
+    assert hasattr(pycmg, "parse_number_with_suffix")
 
 
 def test_parse_number_with_suffix() -> None:

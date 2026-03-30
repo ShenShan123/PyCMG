@@ -21,8 +21,8 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from pycmg.ctypes_host import Model, Instance
-from pycmg.testing import (
+from pycmg import Model, Instance
+from tests.helpers import (
     OSDI_PATH, run_ngspice_ac, assert_close,
     ABS_TOL_C, REL_TOL_CAP,
 )

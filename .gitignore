@@ -2,6 +2,6 @@
 build*/
 __pycache__/
 # Ignore commercial TSMC PDK modelcards (IP-protected)
-tech_model_cards/TSMC*/*.l
+modelcards/TSMC*/*.l
 # But allow naive (generated) modelcards
-!tech_model_cards/TSMC*/naive/
+!modelcards/TSMC*/naive/

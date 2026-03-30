@@ -15,8 +15,8 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from pycmg.ctypes_host import Model, Instance
-from pycmg.testing import OSDI_PATH, run_ngspice_op, assert_close, REL_TOL
+from pycmg import Model, Instance
+from tests.helpers import OSDI_PATH, run_ngspice_op, assert_close, REL_TOL
 from tests.conftest import TECHNOLOGIES, TECH_NAMES, get_tech_modelcard
 
 

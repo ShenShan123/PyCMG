@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from pycmg.ctypes_host import Model, Instance
-from pycmg.testing import OSDI_PATH, run_ngspice_op, assert_close
+from pycmg import Model, Instance
+from tests.helpers import OSDI_PATH, run_ngspice_op, assert_close
 from tests.conftest import (
     ALL_TECHNOLOGIES, CORE_VT_NAMES, get_tech_modelcard,
 )

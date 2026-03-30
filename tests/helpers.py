@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OSDI_PATH = ROOT / "build-deep-verify" / "osdi" / "bsimcmg.osdi"
-BUILD = ROOT / "build-deep-verify"
+OSDI_PATH = ROOT / "build" / "osdi" / "bsimcmg.osdi"
+BUILD = ROOT / "build"
 NGSPICE_BIN = os.environ.get("NGSPICE_BIN", "/usr/local/ngspice-45.2/bin/ngspice")
 
 # Tolerances — single source of truth

@@ -4,7 +4,7 @@ NFIN (Number of Fins) Scaling Sanity Tests
 PyCMG-only tests verifying that NFIN scaling produces expected proportional
 changes in drain current and gate charge. No NGSPICE comparison needed.
 
-NFIN handling in ctypes_host.py:
+NFIN handling in parser.py/model.py:
   - parse_modelcard() forces NFIN=1.0 in the modelcard params (lines 429-430).
   - Instance.__init__() applies modelcard params first, then instance params.
   - apply_param() has NO NFIN override, so instance-level NFIN values should
@@ -25,7 +25,7 @@ import pytest
 from pycmg import Model, Instance
 from tests.conftest import get_tech_modelcard, TECHNOLOGIES
 
-from pycmg.testing import OSDI_PATH
+from tests.helpers import OSDI_PATH
 TECH = "ASAP7"
 
 
