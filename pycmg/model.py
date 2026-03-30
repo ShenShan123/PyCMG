@@ -167,7 +167,8 @@ class Instance:
     """
 
     def __init__(self, model: Model, params: Optional[Dict[str, float]] = None,
-                 temperature: float = 300.15) -> None:
+                 temperature: float = 300.15,
+                 model_overrides: Optional[Dict[str, float]] = None) -> None:
         self._model = model
         self._inst = OsdiInstance(model.descriptor)
         self._temperature = temperature
@@ -182,6 +183,13 @@ class Instance:
         self._connected_terminals = int(model.descriptor.num_terminals)
         for key, val in model.modelcard_params.items():
             apply_param(model.descriptor, self._inst, model.model, key, val, True)
+        # 2. Apply process variation overrides (model-level, overrides modelcard)
+        # WARNING: model_overrides writes to shared OsdiModel buffer. Do not reuse
+        # an Instance after creating another Instance from the same Model with
+        # different model_overrides — the shared buffer will have the latest values.
+        if model_overrides:
+            for key, val in model_overrides.items():
+                apply_param(model.descriptor, self._inst, model.model, key, val, True)
         if params:
             for key, val in params.items():
                 apply_param(model.descriptor, self._inst, model.model, key, val, False)
