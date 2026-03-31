@@ -34,7 +34,7 @@ from typing import List
 # Add parent directory to path to import from pycmg
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pycmg.parser import _extract_model_params, _find_length_variant, parse_number_with_suffix
+from pycmg.parser import _extract_model_params, _find_length_variant, parse_number_with_suffix, scan_pdk_geometry_combos
 
 
 # Parameters that should NOT be included in naive modelcards (instance parameters)
@@ -55,6 +55,7 @@ def generate_naive_tsmc_modelcard(
     L: float,
     output_path: str,
     tech: str,
+    NFIN: float | None = None,
 ) -> None:
     """
     Generate naive TSMC modelcard by merging global + variant parameters.
@@ -73,8 +74,8 @@ def generate_naive_tsmc_modelcard(
     expected_type = "nmos" if model_type == "nch" else "pmos"
     global_params = _extract_model_params(pdk_path, f"{base_name}.global", expected_type)
 
-    # Find which variant matches the L value
-    variant_num = _find_length_variant(pdk_path, base_name, L)
+    # Find which variant matches the L (and NFIN) value
+    variant_num = _find_length_variant(pdk_path, base_name, L, NFIN)
 
     # Extract variant model parameters
     variant_params = _extract_model_params(pdk_path, f"{base_name}.{variant_num}", expected_type)
@@ -142,6 +143,7 @@ def batch_generate_naive_modelcards(
     devices: List[str],
     lengths: List[float],
     tech: str,
+    NFIN: float | None = None,
 ) -> None:
     """
     Batch generate naive modelcards for multiple devices and lengths.
@@ -152,6 +154,7 @@ def batch_generate_naive_modelcards(
         devices: List of device names (e.g., ["nch_svt_mac", "pch_svt_mac"])
         lengths: List of gate lengths in meters (e.g., [16e-9, 20e-9, 24e-9])
         tech: Technology name for header (e.g., "TSMC7")
+        NFIN: Fin count for NFIN-group-specific variant selection.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -183,6 +186,7 @@ def batch_generate_naive_modelcards(
                     L,
                     str(file_path),
                     tech,
+                    NFIN=NFIN,
                 )
                 total_files += 1
             except Exception as e:
@@ -248,6 +252,13 @@ Examples:
         required=True,
         help="Comma-separated list of gate lengths in meters (e.g., 16e-9,20e-9,24e-9)"
     )
+    parser.add_argument(
+        "--nfin",
+        type=float,
+        default=None,
+        help="Fin count for NFIN-group-specific variant selection. "
+             "Without this, the first L-matching variant is used (may be wrong NFIN group)."
+    )
 
     args = parser.parse_args()
 
@@ -294,6 +305,7 @@ Examples:
         devices,
         lengths,
         args.tech,
+        NFIN=args.nfin,
     )
 
 

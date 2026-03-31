@@ -178,5 +178,5 @@ def test_resolve_modelcard_tsmc_invalid_l():
     from pycmg.tech import TECH_REGISTRY, resolve_modelcard
     tech = TECH_REGISTRY["TSMC7"]
     dev = tech.get_device("nmos_svt")
-    with pytest.raises(RuntimeError, match="No length variant"):
+    with pytest.raises(RuntimeError, match="No variant found"):
         resolve_modelcard(dev, tech, 1e-9)  # 1nm is below all bins

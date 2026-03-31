@@ -9,8 +9,7 @@ Usage examples::
     python scripts/generate_training_data.py \\
         --osdi build/osdi/bsimcmg.osdi \\
         --tech ASAP7 --devices nmos_rvt \\
-        --l-multipliers 1 --nfins 1 --temps 27 \\
-        --vg-points 5 --vd-points 5
+        --temps 27 --vg-points 5 --vd-points 5
 
     # Full sweep across all techs with process variation
     python scripts/generate_training_data.py \\
@@ -99,9 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  # Quick test with ASAP7 NMOS\n"
+            "  # Quick test with ASAP7 NMOS (single default geometry)\n"
             "  %(prog)s --osdi build/osdi/bsimcmg.osdi --tech ASAP7 "
-            "--devices nmos_rvt --l-multipliers 1 --nfins 1 --temps 27\n"
+            "--devices nmos_rvt --no-sweep-geometry --temps 27\n"
             "\n"
             "  # List available devices\n"
             "  %(prog)s --osdi build/osdi/bsimcmg.osdi --list-devices\n"
@@ -148,22 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print available devices for specified tech(s) and exit.",
     )
 
-    # Geometry sweep parameters
+    # Geometry sweep
     parser.add_argument(
-        "--l-multipliers",
-        nargs="+",
-        type=float,
-        default=[1.0, 2.0, 3.0, 4.0, 5.0],
-        metavar="F",
-        help="Gate length multipliers applied to min_l (default: 1 2 3 4 5)",
-    )
-    parser.add_argument(
-        "--nfins",
-        nargs="+",
-        type=float,
-        default=[1.0, 2.0, 3.0],
-        metavar="F",
-        help="Fin count values to sweep (default: 1 2 3)",
+        "--no-sweep-geometry",
+        action="store_true",
+        help="Disable PDK-defined geometry sweep.  Uses single (min_l, 1) "
+             "per device instead of all (L, NFIN) bin boundary combinations.",
     )
 
     # Operating conditions
@@ -217,6 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.6,
         metavar="F",
         help="Fraction of vg_points in threshold-dense region (default: 0.6)",
+    )
+    parser.add_argument(
+        "--voltage-scale",
+        type=float,
+        default=1.0,
+        metavar="F",
+        help="Voltage range multiplier (default: 1.0). Use 2.0 to extend "
+             "sweeps to 2*VDD for NN simulator convergence training.",
     )
 
     # Output
@@ -302,8 +299,7 @@ def main() -> None:
         techs=args.tech,
         devices=devices,
         output_dir=args.output_dir,
-        l_multipliers=args.l_multipliers,
-        nfins=args.nfins,
+        sweep_geometry=not args.no_sweep_geometry,
         temperatures=temperatures,
         vg_points=args.vg_points,
         vd_points=args.vd_points,
@@ -312,6 +308,7 @@ def main() -> None:
         dense_ratio=args.dense_ratio,
         split_by=args.split_by,
         verbose=verbose,
+        voltage_scale=args.voltage_scale,
     )
 
     # Report output

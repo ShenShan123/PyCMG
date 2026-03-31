@@ -24,7 +24,9 @@ from typing import Dict, List, Optional
 from pycmg.parser import (
     _extract_model_params,
     _find_length_variant,
+    _scan_all_variants,
     parse_number_with_suffix,
+    scan_pdk_geometry_combos,
 )
 
 # Project root for resolving relative modelcard/pdk paths
@@ -90,14 +92,6 @@ def _parse_modelcard_l(modelcard_path: str) -> float:
 def _scan_pdk_device_min_l(pdk_path: str, device_name: str) -> float:
     """Scan a TSMC PDK file for the minimum lmin across all numbered variants.
 
-    TSMC PDK files contain numbered model bins like ``nch_svt_mac.1``,
-    ``nch_svt_mac.2``, etc.  Each bin has ``lmin`` and ``lmax`` parameters
-    defining its length range.  This function finds the global minimum
-    ``lmin`` across all numbered variants for the given device.
-
-    The ``lmin`` parameter may appear on the ``.model`` line itself or on
-    continuation lines (starting with ``+``).
-
     Args:
         pdk_path: Path to the TSMC PDK file (relative or absolute).
         device_name: PDK device name, e.g. ``"nch_svt_mac"``.
@@ -109,58 +103,13 @@ def _scan_pdk_device_min_l(pdk_path: str, device_name: str) -> float:
         RuntimeError: If no numbered variants are found for the device.
     """
     path = _resolve_path(pdk_path)
-    with open(path, "r", encoding="utf-8") as fh:
-        lines = fh.readlines()
-
-    prefix = f"{device_name.lower()}."
-    all_lmin: list[float] = []
-    idx = 0
-
-    while idx < len(lines):
-        raw = lines[idx]
-        stripped = raw.strip()
-
-        if not stripped or stripped.startswith("*"):
-            idx += 1
-            continue
-
-        if stripped.lower().startswith(".model"):
-            parts = stripped.split()
-            if len(parts) >= 3:
-                model_name = parts[1].lower()
-                if model_name.startswith(prefix):
-                    suffix = model_name[len(prefix):]
-                    if suffix.isdigit():
-                        # Collect all lines of this model block
-                        block_text = stripped
-                        idx += 1
-                        while idx < len(lines):
-                            cont = lines[idx].strip()
-                            if not cont or cont.startswith("*"):
-                                idx += 1
-                                continue
-                            if cont.startswith("+"):
-                                block_text += " " + cont[1:]
-                                idx += 1
-                                continue
-                            break
-                        # Extract lmin from the block
-                        for m in _ASSIGN_RE.finditer(block_text):
-                            if m.group(1).lower() == "lmin":
-                                all_lmin.append(
-                                    parse_number_with_suffix(m.group(2))
-                                )
-                                break
-                        continue  # idx already advanced
-
-        idx += 1
-
-    if not all_lmin:
+    variants = _scan_all_variants(str(path), device_name)
+    if not variants:
         raise RuntimeError(
             f"No numbered variants found for device '{device_name}' "
             f"in PDK file: {pdk_path}"
         )
-    return min(all_lmin)
+    return min(v.lmin for v in variants)
 
 
 @dataclass
@@ -218,6 +167,45 @@ class DeviceConfig:
                 f"no modelcard or pdk_device+pdk_path available"
             )
         return self._min_l
+
+    def get_geometry_combos(
+        self,
+        pdk_path: str | None = None,
+        ref_pdk_path: str | None = None,
+        ref_device_name: str | None = None,
+    ) -> list[tuple[float, float]]:
+        """Return PDK-defined (L, NFIN) combinations for sweep.
+
+        For TSMC devices, returns all ``(lmin, nfin)`` points where
+        ``nfin`` is each of ``{nfinmin, nfinmax}`` per variant.
+
+        For ASAP7 devices (no PDK binning), uses a reference TSMC device's
+        NFIN boundaries combined with ASAP7's single L value.
+
+        Args:
+            pdk_path: Path to TSMC PDK file (for TSMC devices).
+            ref_pdk_path: Reference TSMC PDK path for ASAP7 NFIN boundaries.
+            ref_device_name: Reference TSMC device name for ASAP7 NFIN
+                boundaries (e.g., ``"nch_svt_mac"`` for NMOS).
+
+        Returns:
+            Sorted list of ``(L, NFIN)`` tuples.
+        """
+        if self.pdk_device is not None and pdk_path is not None:
+            resolved = str(_resolve_path(pdk_path))
+            return scan_pdk_geometry_combos(resolved, self.pdk_device)
+
+        # ASAP7: use reference TSMC device NFIN boundaries with ASAP7 L
+        min_l = self.get_min_l(pdk_path)
+        if ref_pdk_path is not None and ref_device_name is not None:
+            resolved_ref = str(_resolve_path(ref_pdk_path))
+            ref_combos = scan_pdk_geometry_combos(resolved_ref, ref_device_name)
+            # Extract unique NFIN values from reference device
+            nfin_values = sorted({nfin for _, nfin in ref_combos})
+            return [(min_l, nfin) for nfin in nfin_values]
+
+        # Fallback: single combo
+        return [(min_l, 1.0)]
 
 
 @dataclass
@@ -419,6 +407,7 @@ def generate_naive_tsmc_modelcard(
     L: float,
     output_path: str,
     tech: str,
+    NFIN: Optional[float] = None,
 ) -> None:
     """Generate naive TSMC modelcard by merging global + variant parameters.
 
@@ -437,9 +426,10 @@ def generate_naive_tsmc_modelcard(
         L: Target gate length in meters (e.g., 16e-9).
         output_path: Output file path.
         tech: Technology name for header comment (e.g., ``"TSMC7"``).
+        NFIN: Fin count for NFIN-group-specific variant selection.
 
     Raises:
-        RuntimeError: If no length variant matches *L* in the PDK file.
+        RuntimeError: If no variant matches *L* (and *NFIN*) in the PDK file.
     """
     base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
 
@@ -447,8 +437,8 @@ def generate_naive_tsmc_modelcard(
     expected_type = "nmos" if model_type == "nch" else "pmos"
     global_params = _extract_model_params(pdk_path, f"{base_name}.global", expected_type)
 
-    # Find which variant matches the L value
-    variant_num = _find_length_variant(pdk_path, base_name, L)
+    # Find which variant matches the L (and NFIN) value
+    variant_num = _find_length_variant(pdk_path, base_name, L, NFIN)
 
     # Extract variant model parameters
     variant_params = _extract_model_params(pdk_path, f"{base_name}.{variant_num}", expected_type)
@@ -460,9 +450,10 @@ def generate_naive_tsmc_modelcard(
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
+    nfin_str = f" NFIN={NFIN:.0f}" if NFIN is not None else ""
     with open(output_file, "w") as f:
         # Header
-        f.write(f"* Naive {tech} {device_type} modelcard for L={L*1e9:.1f}nm\n")
+        f.write(f"* Naive {tech} {device_type} modelcard for L={L*1e9:.1f}nm{nfin_str}\n")
         f.write(f"* Generated from: {pdk_path}\n")
         f.write(f"* Device: {base_name}, Variant: .{variant_num}\n")
         f.write(f"* Process corner: TT (typical)\n")
@@ -512,22 +503,24 @@ def resolve_modelcard(
     device: DeviceConfig,
     tech: TechConfig,
     L: float,
+    NFIN: Optional[float] = None,
     cache_dir: str = "build/modelcards",
 ) -> str:
-    """Resolve a modelcard path for a device at a given gate length.
+    """Resolve a modelcard path for a device at a given gate length and NFIN.
 
     For ASAP7 devices (with a static ``modelcard`` attribute), returns the
-    resolved path directly — the same file is used regardless of *L*.
+    resolved path directly — the same file is used regardless of *L* or *NFIN*.
 
     For TSMC devices (with a ``pdk_device`` attribute), generates a naive
     modelcard on-the-fly from the full PDK and caches it under *cache_dir*.
-    Subsequent calls with the same device and *L* return the cached file
-    without regeneration.
+    When *NFIN* is provided, the correct NFIN group variant is selected and
+    the cache filename includes the NFIN value.
 
     Args:
         device: Device configuration from the technology registry.
         tech: Technology configuration (provides ``pdk_path`` and ``name``).
         L: Target gate length in meters (e.g., 16e-9).
+        NFIN: Fin count for NFIN-group-specific variant selection.
         cache_dir: Directory for cached generated modelcards, resolved
             relative to the project root.  Defaults to ``"build/modelcards"``.
 
@@ -536,9 +529,9 @@ def resolve_modelcard(
 
     Raises:
         ValueError: If *device* has neither ``modelcard`` nor ``pdk_device``.
-        RuntimeError: If *L* falls outside all PDK variant ranges (TSMC only).
+        RuntimeError: If *L* (and *NFIN*) fall outside all PDK variant ranges.
     """
-    # ASAP7: static modelcard, L-independent
+    # ASAP7: static modelcard, L/NFIN-independent
     if device.modelcard is not None:
         return str(_resolve_path(device.modelcard))
 
@@ -554,9 +547,12 @@ def resolve_modelcard(
         cache_root = _resolve_path(cache_dir)
         tech_cache = cache_root / tech.name
 
-        # Build output filename: {pdk_device}_l{L_nm}nm.l
+        # Build output filename, including NFIN when provided
         L_nm = int(L * 1e9)
-        filename = f"{device.pdk_device}_l{L_nm}nm.l"
+        if NFIN is not None:
+            filename = f"{device.pdk_device}_l{L_nm}nm_nfin{NFIN:.0f}.l"
+        else:
+            filename = f"{device.pdk_device}_l{L_nm}nm.l"
         output_path = tech_cache / filename
 
         # Return cached file if it already exists
@@ -581,6 +577,7 @@ def resolve_modelcard(
             L=L,
             output_path=str(output_path),
             tech=tech.name,
+            NFIN=NFIN,
         )
 
         return str(output_path)

@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .osdi_types import _to_lower
 
@@ -163,30 +163,30 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
     raise RuntimeError(f"no {expected} model found in modelcard: {path}")
 
 
-def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> ParsedModel:
-    """
-    Extract and merge model parameters from full TSMC PDK.
+def parse_tsmc_pdk(
+    path: str,
+    model_type: str,
+    device_type: str,
+    L: float,
+    NFIN: Optional[float] = None,
+) -> ParsedModel:
+    """Extract and merge model parameters from full TSMC PDK.
 
     This function works with all TSMC FinFET PDKs (TSMC5, TSMC7, TSMC12, TSMC16)
     which share the same structure:
     - .global model: base parameters for all variants
-    - .1 through .N variants: length-binned models with lmin/lmax
+    - .1 through .N variants: length-binned models with lmin/lmax and nfinmin/nfinmax
     - Subcircuit wrappers: not needed for OSDI (we use model directly)
 
     Args:
         path: Path to TSMC PDK file (e.g., cln7_1d8_sp_v1d2_2p2.l)
-        model_type: "nch" for NMOS, "pch" for PMOS
-        device_type: Device type - "svt_mac", "lvt_mac", "ulvt_mac", "18_mac", etc.
-        L: Gate length in meters (used for automatic variant selection)
+        model_type: ``"nch"`` for NMOS, ``"pch"`` for PMOS.
+        device_type: Device type - ``"svt_mac"``, ``"lvt_mac"``, etc.
+        L: Gate length in meters (used for automatic variant selection).
+        NFIN: Fin count.  When given, selects the correct NFIN group.
 
     Returns:
-        ParsedModel with merged global + variant parameters
-
-    Example:
-        >>> parse_tsmc_pdk("cln7_1d8_sp_v1d2_2p2.l", "nch", "svt_mac", 16e-9)
-        ParsedModel(name="nch_svt_mac", params={...merged params...})
-        >>> parse_tsmc_pdk("cln5_1d2_sp_v1d2_2p2.l", "pch", "lvt_mac", 20e-9)
-        ParsedModel(name="pch_lvt_mac", params={...merged params...})
+        ParsedModel with merged global + variant parameters.
     """
     base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
     expected_type = "nmos" if model_type == "nch" else "pmos"
@@ -196,9 +196,9 @@ def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> Pa
         global_params = _extract_model_params(path, f"{base_name}.global", expected_type)
     except RuntimeError as e:
         raise RuntimeError(
-            f"TSMC7 PDK file '{path}' does not contain the expected .global model "
+            f"TSMC PDK file '{path}' does not contain the expected .global model "
             f"'{base_name}.global'. This usually means:\n"
-            f"  1. The file is not a valid TSMC7 PDK file\n"
+            f"  1. The file is not a valid TSMC PDK file\n"
             f"  2. The model_type '{model_type}' and device_type '{device_type}' combination "
             f"does not exist in this PDK\n"
             f"  3. The PDK file format has changed\n\n"
@@ -206,8 +206,8 @@ def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> Pa
             f"Original error: {e}"
         ) from e
 
-    # Find which variant matches the L value
-    variant_num = _find_length_variant(path, base_name, L)
+    # Find which variant matches the L (and NFIN) value
+    variant_num = _find_length_variant(path, base_name, L, NFIN)
 
     # Extract variant model parameters
     variant_params = _extract_model_params(path, f"{base_name}.{variant_num}", expected_type)
@@ -218,33 +218,33 @@ def parse_tsmc_pdk(path: str, model_type: str, device_type: str, L: float) -> Pa
     return ParsedModel(name=base_name, params=merged_params)
 
 
-def _find_length_variant(path: str, base_name: str, L: float) -> int:
-    """
-    Find which length variant matches L value.
+@dataclass
+class VariantInfo:
+    """Parsed information about a single numbered PDK variant."""
 
-    All TSMC FinFET PDKs (TSMC5, TSMC7, TSMC12, TSMC16) use numbered bins
-    with lmin/lmax ranges. The number of bins varies by technology:
-    - TSMC5, TSMC12: 5 bins per corner
-    - TSMC7: 30 bins
-    - TSMC16: 25 bins per corner
+    variant_num: int
+    lmin: float
+    lmax: float
+    nfinmin: Optional[float] = None
+    nfinmax: Optional[float] = None
 
-    Supported variant suffixes:
-    - Numeric (.1, .2, ...): Length-binned models with lmin/lmax
-    - .global: Base parameters (handled separately in parse_tsmc_pdk)
-    - Other non-numeric suffixes: Logged as warnings and skipped
+
+def _scan_all_variants(path: str, base_name: str) -> List[VariantInfo]:
+    """Scan a TSMC PDK file and return all numbered variant records for a device.
+
+    Parses every ``.model {base_name}.N`` block (where N is a digit) and
+    extracts lmin, lmax, nfinmin, nfinmax from each.
 
     Args:
-        path: Path to TSMC PDK file
-        base_name: Base model name (e.g., "nch_svt_mac")
-        L: Gate length in meters
+        path: Path to TSMC PDK file.
+        base_name: Base model name (e.g., ``"nch_svt_mac"``).
 
     Returns:
-        Variant number (integer)
-
-    Raises:
-        RuntimeError: If no variant matches the L value
+        List of :class:`VariantInfo` in file order.
     """
     assign_re = _ASSIGN_RE
+    prefix = f"{base_name.lower()}."
+    variants: List[VariantInfo] = []
 
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -254,35 +254,26 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
         raw = lines[idx]
         trimmed = raw.strip()
 
-        # Skip comments and empty lines
         if not trimmed or trimmed.startswith("*"):
             idx += 1
             continue
 
-        # Look for variant model definitions
         if trimmed.lower().startswith(".model"):
-            # Check if this is a variant model for our base_name
             parts = trimmed.split()
             if len(parts) >= 3:
                 model_name = parts[1]
+                if model_name.lower().startswith(prefix):
+                    suffix = model_name[len(base_name) + 1:]
 
-                # Check if this is a variant of our model (e.g., nch_svt_mac.4 or nch_svt_mac.global)
-                if model_name.lower().startswith(f"{base_name.lower()}."):
-                    variant_suffix = model_name[len(base_name) + 1:]  # Get suffix after dot
-
-                    # Skip .global variant (handled separately in parse_tsmc7_pdk)
-                    if variant_suffix.lower() == "global":
+                    if suffix.lower() == "global":
                         idx += 1
                         continue
 
-                    # Only process numbered variants (1-30)
-                    if variant_suffix.isdigit():
-                        # Parse the model block to extract lmin/lmax
+                    if suffix.isdigit():
                         block_lines = [trimmed]
                         idx += 1
                         while idx < len(lines):
-                            cont_raw = lines[idx]
-                            cont = cont_raw.strip()
+                            cont = lines[idx].strip()
                             if not cont or cont.startswith("*"):
                                 idx += 1
                                 continue
@@ -292,9 +283,7 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
                                 continue
                             break
 
-                        # Extract lmin and lmax from this variant
-                        lmin = None
-                        lmax = None
+                        lmin = lmax = nfinmin = nfinmax = None
                         for line in block_lines:
                             for match in assign_re.finditer(line):
                                 key = match.group(1).lower()
@@ -303,22 +292,101 @@ def _find_length_variant(path: str, base_name: str, L: float) -> int:
                                     lmin = val
                                 elif key == "lmax":
                                     lmax = val
+                                elif key == "nfinmin":
+                                    nfinmin = val
+                                elif key == "nfinmax":
+                                    nfinmax = val
 
-                        # Check if L falls within this variant's range
                         if lmin is not None and lmax is not None:
-                            if lmin <= L <= lmax:
-                                return int(variant_suffix)
+                            variants.append(VariantInfo(
+                                variant_num=int(suffix),
+                                lmin=lmin,
+                                lmax=lmax,
+                                nfinmin=nfinmin,
+                                nfinmax=nfinmax,
+                            ))
+                        continue  # idx already advanced
                     else:
-                        # Log warning for unexpected non-numeric variant suffix
-                        # This helps with debugging if new variant types are added
                         sys.stderr.write(
                             f"Warning: Skipping unexpected variant '{model_name}' "
-                            f"(suffix '{variant_suffix}' is not numeric or 'global')\n"
+                            f"(suffix '{suffix}' is not numeric or 'global')\n"
                         )
 
         idx += 1
 
-    raise RuntimeError(f"No length variant found for {base_name} with L={L:.3e} in file: {path}")
+    return variants
+
+
+def _find_length_variant(
+    path: str, base_name: str, L: float, NFIN: Optional[float] = None,
+) -> int:
+    """Find which numbered variant matches L (and optionally NFIN).
+
+    TSMC PDKs organise variants as a 2-D grid of (L_bin x NFIN_group).
+    When *NFIN* is provided, both ``lmin <= L <= lmax`` **and**
+    ``nfinmin <= NFIN <= nfinmax`` must be satisfied.  When *NFIN* is
+    ``None``, the first variant whose L range contains *L* is returned
+    (legacy behaviour).
+
+    Args:
+        path: Path to TSMC PDK file.
+        base_name: Base model name (e.g., ``"nch_svt_mac"``).
+        L: Gate length in meters.
+        NFIN: Fin count.  When given, selects the correct NFIN group.
+
+    Returns:
+        Variant number (integer).
+
+    Raises:
+        RuntimeError: If no variant matches.
+    """
+    variants = _scan_all_variants(path, base_name)
+
+    for v in variants:
+        if v.lmin <= L <= v.lmax:
+            if NFIN is None:
+                return v.variant_num
+            if (v.nfinmin is not None and v.nfinmax is not None
+                    and v.nfinmin <= NFIN <= v.nfinmax):
+                return v.variant_num
+
+    nfin_str = f" NFIN={NFIN}" if NFIN is not None else ""
+    raise RuntimeError(
+        f"No variant found for {base_name} with L={L:.3e}{nfin_str} "
+        f"in file: {path}"
+    )
+
+
+def scan_pdk_geometry_combos(
+    path: str, base_name: str,
+) -> List[Tuple[float, float]]:
+    """Return all PDK-defined (L, NFIN) sweep points for a device.
+
+    For each numbered variant, generates two points using the bin
+    boundaries: ``(lmin, nfinmin)`` and ``(lmin, nfinmax)``.  Both points
+    share the same modelcard (same variant binning coefficients); only the
+    NFIN instance parameter differs.
+
+    The result is deduplicated (adjacent NFIN groups share boundary
+    values) and sorted ascending by ``(L, NFIN)``.
+
+    Args:
+        path: Path to TSMC PDK file.
+        base_name: Base model name (e.g., ``"pch_lvt_mac"``).
+
+    Returns:
+        Sorted list of unique ``(L, NFIN)`` tuples.
+    """
+    variants = _scan_all_variants(path, base_name)
+
+    combos: set[Tuple[float, float]] = set()
+    for v in variants:
+        if v.nfinmin is not None:
+            combos.add((v.lmin, v.nfinmin))
+        if v.nfinmax is not None:
+            combos.add((v.lmin, v.nfinmax))
+
+    return sorted(combos)
 
 
 def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dict[str, float]:

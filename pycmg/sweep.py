@@ -71,8 +71,8 @@ def build_nodes(
     maps them to actual node voltages depending on device polarity.
 
     Args:
-        vg_mag: Gate voltage magnitude (0 to Vdd).
-        vd_mag: Drain voltage magnitude (0 to Vdd).
+        vg_mag: Gate voltage magnitude (0 to Vdd*voltage_scale).
+        vd_mag: Drain voltage magnitude (0 to Vdd*voltage_scale).
         ve_mag: Bulk/body voltage magnitude (typically 0).
         vdd: Supply voltage.
         device_type: ``"nmos"`` or ``"pmos"``.
@@ -98,6 +98,7 @@ def build_voltage_grid(
     vg_points: int = 50,
     vd_points: int = 50,
     dense_ratio: float = 0.6,
+    voltage_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build a non-uniform Vg grid (dense near threshold) and uniform Vd grid.
 
@@ -106,18 +107,22 @@ def build_voltage_grid(
     neural network training accuracy.
 
     Args:
-        vdd: Supply voltage (upper bound for both grids).
+        vdd: Nominal supply voltage (used for dense region width calculation).
         vth_mag: Threshold voltage magnitude for dense region centering.
         vg_points: Total target number of Vg points.
         vd_points: Number of Vd points (uniform).
         dense_ratio: Fraction of vg_points allocated to the dense region.
+        voltage_scale: Multiplier for voltage range upper bound. Use 2.0
+            to extend sweeps to 2*VDD for NN simulator convergence training.
 
     Returns:
         Tuple of ``(vg_array, vd_array)``, both sorted with no duplicates.
     """
-    # Dense region: +/- 0.15*Vdd around Vth, clipped to [0, Vdd]
+    v_max = vdd * voltage_scale
+
+    # Dense region: +/- 0.15*Vdd around Vth, clipped to [0, v_max]
     dense_lo = max(0.0, vth_mag - 0.15 * vdd)
-    dense_hi = min(vdd, vth_mag + 0.15 * vdd)
+    dense_hi = min(v_max, vth_mag + 0.15 * vdd)
 
     n_dense = int(vg_points * dense_ratio)
     n_sparse = vg_points - n_dense
@@ -126,7 +131,7 @@ def build_voltage_grid(
     vg_dense = np.linspace(dense_lo, dense_hi, n_dense)
 
     # Sparse points across the full range
-    vg_sparse = np.linspace(0.0, vdd, n_sparse)
+    vg_sparse = np.linspace(0.0, v_max, n_sparse)
 
     # Merge, sort, deduplicate
     vg_all = np.concatenate([vg_dense, vg_sparse])
@@ -134,7 +139,7 @@ def build_voltage_grid(
     vg_all = np.unique(vg_all)
 
     # Vd: uniform
-    vd_all = np.linspace(0.0, vdd, vd_points)
+    vd_all = np.linspace(0.0, v_max, vd_points)
 
     return vg_all, vd_all
 
@@ -263,8 +268,10 @@ class SweepConfig:
         techs: Technology names to sweep (e.g., ``["ASAP7", "TSMC7"]``).
         devices: Optional per-tech device filter (supports glob patterns).
             ``None`` means all devices in each technology.
-        l_multipliers: Gate length multipliers applied to min_l.
-        nfins: Fin count values to sweep.
+        sweep_geometry: When ``True``, use PDK-defined (L, NFIN) combinations
+            from the technology modelcard bin boundaries.  Each variant
+            contributes ``(lmin, nfinmin)`` and ``(lmin, nfinmax)`` points.
+            When ``False``, use a single default ``(min_l, 1.0)`` per device.
         temperatures: Operating temperatures in Kelvin.
         vg_points: Number of gate voltage grid points.
         vd_points: Number of drain voltage grid points.
@@ -273,14 +280,13 @@ class SweepConfig:
             Maps parameter name to list of values.
         dense_ratio: Fraction of vg_points in the threshold-dense region.
         n_coarse: Number of points for coarse threshold detection.
+        voltage_scale: Voltage range multiplier. Use 2.0 to extend sweeps
+            to 2*VDD for NN simulator convergence training.
     """
 
     techs: List[str]
     devices: Dict[str, List[str]] | None = None
-    l_multipliers: List[float] = field(
-        default_factory=lambda: [1.0, 2.0, 3.0, 4.0, 5.0]
-    )
-    nfins: List[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])
+    sweep_geometry: bool = True
     temperatures: List[float] = field(
         default_factory=lambda: [233.15, 273.15, 300.15, 358.15, 398.15]
     )
@@ -290,6 +296,7 @@ class SweepConfig:
     process_vars: Dict[str, List[float]] | None = None
     dense_ratio: float = 0.6
     n_coarse: int = 30
+    voltage_scale: float = 1.0
 
 
 @dataclass
@@ -348,6 +355,9 @@ def sweep_dc(osdi_path: str, config: SweepConfig, verbose: int = 2) -> SweepResu
         pkeys: List[str] = []
         process_combos = [{}]
 
+    # ASAP7 reference PDK for NFIN boundaries (TSMC7)
+    _REF_PDK = "modelcards/TSMC7/cln7_1d8_sp_v1d2_2p2.l"
+
     data: List[list] = []
     columns = build_all_columns(pkeys)
     count = 0
@@ -360,85 +370,97 @@ def sweep_dc(osdi_path: str, config: SweepConfig, verbose: int = 2) -> SweepResu
             device = tech.get_device(device_name)
             device_type = "nmos" if "nmos" in device_name else "pmos"
 
-            # Per-device min_l auto-detection
-            min_l = device.get_min_l(tech.pdk_path)
-            lengths = [min_l * m for m in config.l_multipliers]
+            # Get PDK-defined (L, NFIN) geometry combinations
+            if config.sweep_geometry:
+                if device.pdk_device is not None:
+                    geometry_combos = device.get_geometry_combos(tech.pdk_path)
+                else:
+                    # ASAP7: use TSMC7 NFIN boundaries matched per device type
+                    ref_dev = "nch_svt_mac" if device_type == "nmos" else "pch_svt_mac"
+                    geometry_combos = device.get_geometry_combos(
+                        ref_pdk_path=_REF_PDK, ref_device_name=ref_dev,
+                    )
+            else:
+                min_l = device.get_min_l(tech.pdk_path)
+                geometry_combos = [(min_l, 1.0)]
 
-            for L in lengths:
+            for L, nfin in geometry_combos:
                 try:
-                    modelcard_path = resolve_modelcard(device, tech, L)
+                    modelcard_path = resolve_modelcard(
+                        device, tech, L, NFIN=nfin,
+                    )
                 except (RuntimeError, ValueError) as e:
                     if verbose >= 2:
                         print(
                             f"  Warning: {tech_name} {device_name} "
-                            f"L={L * 1e9:.0f}nm: {e}, skipping"
+                            f"L={L * 1e9:.0f}nm NFIN={nfin:.0f}: {e}, skipping"
                         )
                     continue
 
                 model = Model(osdi_path, modelcard_path, device.model_name)
+                params = {**device.inst_params, "L": L, "NFIN": nfin}
 
                 for proc_combo in process_combos:
-                    for nfin in config.nfins:
-                        for temp in config.temperatures:
-                            params = {**device.inst_params, "L": L, "NFIN": nfin}
-                            inst = Instance(
-                                model,
-                                params=params,
-                                temperature=temp,
-                                model_overrides=proc_combo if proc_combo else None,
-                            )
+                    for temp in config.temperatures:
+                        inst = Instance(
+                            model,
+                            params=params,
+                            temperature=temp,
+                            model_overrides=proc_combo if proc_combo else None,
+                        )
 
-                            t0 = time.time()
-                            vth_mag = find_threshold(
-                                inst, tech.vdd, device_type, config.n_coarse
-                            )
-                            vg_arr, vd_arr = build_voltage_grid(
-                                tech.vdd,
-                                vth_mag,
-                                config.vg_points,
-                                config.vd_points,
-                                config.dense_ratio,
-                            )
+                        t0 = time.time()
+                        vth_mag = find_threshold(
+                            inst, tech.vdd, device_type, config.n_coarse
+                        )
+                        vg_arr, vd_arr = build_voltage_grid(
+                            tech.vdd,
+                            vth_mag,
+                            config.vg_points,
+                            config.vd_points,
+                            config.dense_ratio,
+                            config.voltage_scale,
+                        )
 
-                            n_points = 0
-                            for ve in config.ve_values:
-                                for vg_mag in vg_arr:
-                                    for vd_mag in vd_arr:
-                                        nodes = build_nodes(
-                                            vg_mag, vd_mag, ve, tech.vdd, device_type
-                                        )
-                                        result = inst.eval_dc(nodes)
-                                        row: list = [
-                                            tech_name,
-                                            device_name,
-                                            L,
-                                            nfin,
-                                            tech.tfin,
-                                            temp,
-                                            *[proc_combo.get(k, 0.0) for k in pkeys],
-                                            nodes["g"],
-                                            nodes["d"],
-                                            nodes["s"],
-                                            nodes["e"],
-                                            vth_mag,
-                                            *[result[k] for k in OUTPUT_KEYS],
-                                        ]
-                                        data.append(row)
-                                        n_points += 1
+                        n_points = 0
+                        for ve in config.ve_values:
+                            for vg_mag in vg_arr:
+                                for vd_mag in vd_arr:
+                                    nodes = build_nodes(
+                                        vg_mag, vd_mag, ve, tech.vdd, device_type
+                                    )
+                                    result = inst.eval_dc(nodes)
+                                    row: list = [
+                                        tech_name,
+                                        device_name,
+                                        L,
+                                        nfin,
+                                        tech.tfin,
+                                        temp,
+                                        *[proc_combo.get(k, 0.0) for k in pkeys],
+                                        nodes["g"],
+                                        nodes["d"],
+                                        nodes["s"],
+                                        nodes["e"],
+                                        vth_mag,
+                                        *[result[k] for k in OUTPUT_KEYS],
+                                    ]
+                                    data.append(row)
+                                    n_points += 1
 
-                            count += 1
-                            if verbose >= 2:
-                                elapsed = time.time() - t0
-                                proc_str = " ".join(
-                                    f"{k}={v:.2e}" for k, v in proc_combo.items()
-                                )
-                                print(
-                                    f"[{count}] {tech_name} {device_name} "
-                                    f"L={L * 1e9:.0f}nm NFIN={nfin:.0f} "
-                                    f"T={temp - 273.15:.0f}C "
-                                    f"{proc_str} Vth={vth_mag:.3f}V "
-                                    f"{n_points}pts ({elapsed:.1f}s)"
-                                )
+                        count += 1
+                        if verbose >= 2:
+                            elapsed = time.time() - t0
+                            proc_str = " ".join(
+                                f"{k}={v:.2e}" for k, v in proc_combo.items()
+                            )
+                            print(
+                                f"[{count}] {tech_name} {device_name} "
+                                f"L={L * 1e9:.0f}nm NFIN={nfin:.0f} "
+                                f"T={temp - 273.15:.0f}C "
+                                f"{proc_str} Vth={vth_mag:.3f}V "
+                                f"{n_points}pts ({elapsed:.1f}s)"
+                            )
 
     if verbose >= 1:
         print(f"Done. {len(data)} rows across {count} configurations.")
@@ -530,8 +552,7 @@ def generate_dataset(
     techs: Optional[List[str]] = None,
     devices: Optional[Dict[str, List[str]]] = None,
     output_dir: str = "./training_data",
-    l_multipliers: Optional[List[float]] = None,
-    nfins: Optional[List[float]] = None,
+    sweep_geometry: bool = True,
     temperatures: Optional[List[float]] = None,
     vg_points: int = 50,
     vd_points: int = 50,
@@ -540,6 +561,7 @@ def generate_dataset(
     dense_ratio: float = 0.6,
     split_by: str = "tech",
     verbose: int = 2,
+    voltage_scale: float = 1.0,
 ) -> List[str]:
     """Generate training data CSVs from a DC sweep.
 
@@ -551,8 +573,8 @@ def generate_dataset(
         techs: Technology names to sweep. Defaults to ``["all"]``.
         devices: Optional per-tech device filter (supports glob patterns).
         output_dir: Output directory for CSV files.
-        l_multipliers: Gate length multipliers. ``None`` uses SweepConfig defaults.
-        nfins: Fin count values. ``None`` uses SweepConfig defaults.
+        sweep_geometry: When ``True`` (default), use PDK-defined (L, NFIN)
+            combinations.  When ``False``, use single default per device.
         temperatures: Temperatures in Kelvin. ``None`` uses SweepConfig defaults.
         vg_points: Number of gate voltage grid points.
         vd_points: Number of drain voltage grid points.
@@ -561,6 +583,8 @@ def generate_dataset(
         dense_ratio: Fraction of vg_points in the threshold-dense region.
         split_by: CSV split strategy (``"tech"``, ``"device"``, or ``"none"``).
         verbose: Verbosity level (0=silent, 1=summary, 2=per-config).
+        voltage_scale: Voltage range multiplier (default 1.0). Use 2.0 to
+            extend sweeps to 2*VDD for NN simulator convergence training.
 
     Returns:
         List of absolute paths to the written CSV files.
@@ -568,20 +592,16 @@ def generate_dataset(
     if techs is None:
         techs = ["all"]
 
-    # Build kwargs, only overriding non-None values so SweepConfig defaults
-    # apply for unspecified parameters.
     kwargs: Dict[str, object] = {
         "techs": techs,
         "devices": devices,
+        "sweep_geometry": sweep_geometry,
         "vg_points": vg_points,
         "vd_points": vd_points,
         "process_vars": process_vars,
         "dense_ratio": dense_ratio,
+        "voltage_scale": voltage_scale,
     }
-    if l_multipliers is not None:
-        kwargs["l_multipliers"] = l_multipliers
-    if nfins is not None:
-        kwargs["nfins"] = nfins
     if temperatures is not None:
         kwargs["temperatures"] = temperatures
     if ve_values is not None:

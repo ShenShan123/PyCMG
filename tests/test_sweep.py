@@ -103,8 +103,7 @@ def test_resolve_devices_missing_skipped():
 def test_sweep_config_defaults():
     from pycmg.sweep import SweepConfig
     config = SweepConfig(techs=["ASAP7"])
-    assert config.l_multipliers == [1.0, 2.0, 3.0, 4.0, 5.0]
-    assert config.nfins == [1.0, 2.0, 3.0]
+    assert config.sweep_geometry is True
     assert len(config.temperatures) == 5
     assert config.process_vars is None
 
@@ -132,13 +131,12 @@ def test_build_all_columns_with_process():
 
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
 def test_sweep_dc_smoke():
-    """Minimal sweep: 1 tech, 1 device, 1 L, 1 NFIN, 1 temp, 5x5 grid."""
+    """Minimal sweep: 1 tech, 1 device, no geometry sweep, 1 temp, 5x5 grid."""
     from pycmg.sweep import SweepConfig, sweep_dc, build_all_columns
     config = SweepConfig(
         techs=["ASAP7"],
         devices={"ASAP7": ["nmos_rvt"]},
-        l_multipliers=[1.0],
-        nfins=[1.0],
+        sweep_geometry=False,
         temperatures=[300.15],
         vg_points=5,
         vd_points=5,
@@ -158,8 +156,7 @@ def test_sweep_dc_pmos_voltages():
     config = SweepConfig(
         techs=["ASAP7"],
         devices={"ASAP7": ["pmos_rvt"]},
-        l_multipliers=[1.0],
-        nfins=[1.0],
+        sweep_geometry=False,
         temperatures=[300.15],
         vg_points=3,
         vd_points=3,
@@ -177,8 +174,7 @@ def test_sweep_dc_with_process_vars():
     config = SweepConfig(
         techs=["ASAP7"],
         devices={"ASAP7": ["nmos_rvt"]},
-        l_multipliers=[1.0],
-        nfins=[1.0],
+        sweep_geometry=False,
         temperatures=[300.15],
         vg_points=3,
         vd_points=3,
@@ -234,8 +230,7 @@ def test_generate_dataset_smoke(tmp_path):
         techs=["ASAP7"],
         devices={"ASAP7": ["nmos_rvt"]},
         output_dir=str(tmp_path),
-        l_multipliers=[1.0],
-        nfins=[1.0],
+        sweep_geometry=False,
         temperatures=[300.15],
         vg_points=3,
         vd_points=3,
@@ -244,3 +239,115 @@ def test_generate_dataset_smoke(tmp_path):
     assert len(paths) == 1
     assert Path(paths[0]).exists()
     assert Path(paths[0]).stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# Extended voltage range (voltage_scale) tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_voltage_grid_extended_bounds():
+    from pycmg.sweep import build_voltage_grid
+    vdd = 0.9
+    vg, vd = build_voltage_grid(vdd, 0.35, vg_points=50, vd_points=50,
+                                 voltage_scale=2.0)
+    assert vg[0] >= 0.0
+    assert vg[-1] == pytest.approx(2.0 * vdd, abs=1e-12)
+    assert vd[0] >= 0.0
+    assert vd[-1] == pytest.approx(2.0 * vdd, abs=1e-12)
+
+
+def test_build_voltage_grid_extended_dense_region():
+    """Dense region width should stay at ~0.3*vdd regardless of voltage_scale."""
+    from pycmg.sweep import build_voltage_grid
+    vdd = 0.9
+    vth = 0.35
+
+    vg_1x, _ = build_voltage_grid(vdd, vth, vg_points=50, vd_points=10,
+                                    voltage_scale=1.0, dense_ratio=0.6)
+    vg_2x, _ = build_voltage_grid(vdd, vth, vg_points=50, vd_points=10,
+                                    voltage_scale=2.0, dense_ratio=0.6)
+
+    # Dense region: Vth +/- 0.15*vdd
+    dense_lo = max(0.0, vth - 0.15 * vdd)
+    dense_hi = vth + 0.15 * vdd
+
+    dense_1x = int(np.sum((vg_1x >= dense_lo) & (vg_1x <= dense_hi)))
+    dense_2x = int(np.sum((vg_2x >= dense_lo) & (vg_2x <= dense_hi)))
+
+    # Dense point count should be similar (small difference from deduplication
+    # is acceptable since sparse grid has different step size with 2x range)
+    assert abs(dense_1x - dense_2x) <= 5
+
+
+def test_build_voltage_grid_scale_default_unchanged():
+    """voltage_scale=1.0 should produce identical results to no argument."""
+    from pycmg.sweep import build_voltage_grid
+    vg_a, vd_a = build_voltage_grid(0.75, 0.3, vg_points=40, vd_points=40)
+    vg_b, vd_b = build_voltage_grid(0.75, 0.3, vg_points=40, vd_points=40,
+                                     voltage_scale=1.0)
+    np.testing.assert_array_equal(vg_a, vg_b)
+    np.testing.assert_array_equal(vd_a, vd_b)
+
+
+def test_sweep_config_voltage_scale_default():
+    from pycmg.sweep import SweepConfig
+    config = SweepConfig(techs=["ASAP7"])
+    assert config.voltage_scale == 1.0
+
+
+@pytest.mark.skipif(not OSDI_PATH.exists(), reason="OSDI not built")
+def test_sweep_dc_extended_range():
+    """With voltage_scale=2.0, Vg and Vd should exceed nominal vdd."""
+    from pycmg.sweep import SweepConfig, sweep_dc
+    config = SweepConfig(
+        techs=["ASAP7"],
+        devices={"ASAP7": ["nmos_rvt"]},
+        sweep_geometry=False,
+        temperatures=[300.15],
+        vg_points=5,
+        vd_points=5,
+        voltage_scale=2.0,
+    )
+    result = sweep_dc(str(OSDI_PATH), config, verbose=0)
+    vg_idx = result.columns.index("Vg")
+    vd_idx = result.columns.index("Vd")
+    max_vg = max(row[vg_idx] for row in result.data)
+    max_vd = max(row[vd_idx] for row in result.data)
+    # ASAP7 vdd=0.9, so max should be near 1.8
+    assert max_vg > 0.9
+    assert max_vd > 0.9
+    assert max_vg == pytest.approx(1.8, abs=0.01)
+    assert max_vd == pytest.approx(1.8, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# PDK geometry combo tests
+# ---------------------------------------------------------------------------
+
+
+def test_scan_pdk_geometry_combos_tsmc7():
+    """TSMC7 pch_lvt_mac should return combos for all (L, NFIN) bin boundaries."""
+    from pycmg.parser import scan_pdk_geometry_combos
+    pdk = str(ROOT / "modelcards" / "TSMC7" / "cln7_1d8_sp_v1d2_2p2.l")
+    combos = scan_pdk_geometry_combos(pdk, "pch_lvt_mac")
+    # 6 L bins x 7 unique NFIN boundaries = 42
+    assert len(combos) == 42
+    # All combos should be sorted
+    assert combos == sorted(combos)
+    # Smallest L should be 8nm, smallest NFIN should be 1
+    assert combos[0][0] == pytest.approx(8e-9)
+    assert combos[0][1] == pytest.approx(1.0)
+
+
+def test_find_length_variant_nfin_aware():
+    """NFIN-aware variant selection should pick correct NFIN group."""
+    from pycmg.parser import _find_length_variant
+    pdk = str(ROOT / "modelcards" / "TSMC7" / "cln7_1d8_sp_v1d2_2p2.l")
+    # NFIN=1 should select variant 35 (nfinmin=1, nfinmax=2)
+    v1 = _find_length_variant(pdk, "pch_lvt_mac", 16e-9, NFIN=1)
+    # NFIN=20 should select variant 5 (nfinmin=20, nfinmax=24.888)
+    v20 = _find_length_variant(pdk, "pch_lvt_mac", 16e-9, NFIN=20)
+    assert v1 != v20
+    assert v1 == 35  # nfinmin=1
+    assert v20 == 5   # nfinmin=20

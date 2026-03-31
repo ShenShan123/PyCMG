@@ -4,7 +4,7 @@ PyCMG is a Python ctypes wrapper around the BSIM-CMG OSDI binary, purpose-built 
 
 ## What is PyCMG?
 
-PyCMG loads a compiled BSIM-CMG `.osdi` binary via ctypes (no C++ compilation needed) and calls the model's evaluation functions directly. Given terminal voltages, geometry parameters, and temperature, it returns 17 model outputs (5 currents, 4 charges, 3 derivatives, 5 capacitances). The sweep engine drives this evaluator across Cartesian products of device variants, gate lengths, fin counts, temperatures, and voltage grids to produce million-row datasets for ML training.
+PyCMG loads a compiled BSIM-CMG `.osdi` binary via ctypes (no C++ compilation needed) and calls the model's evaluation functions directly. Given terminal voltages, geometry parameters, and temperature, it returns 17 model outputs (5 currents, 4 charges, 3 derivatives, 5 capacitances). The sweep engine drives this evaluator across PDK-defined geometry combinations (L, NFIN bin boundaries), temperatures, and voltage grids to produce million-row datasets for ML training.
 
 ## Quick Start
 
@@ -92,7 +92,7 @@ pip install numpy pytest
 The main entry point is `scripts/generate_training_data.py`.
 
 ```bash
-# All 5 technologies, all 42 devices, default sweeps
+# All 5 technologies, all 42 devices, PDK-defined geometry sweep
 python scripts/generate_training_data.py \
     --osdi build/osdi/bsimcmg.osdi
 
@@ -106,26 +106,26 @@ python scripts/generate_training_data.py \
     --osdi build/osdi/bsimcmg.osdi \
     --tech ASAP7 --devices nmos_*
 
-# Custom sweep parameters
+# Custom voltage grid and temperature
 python scripts/generate_training_data.py \
     --osdi build/osdi/bsimcmg.osdi \
     --tech ASAP7 \
-    --l-multipliers 1 2 3 \
-    --nfins 1 2 4 \
     --temps -40 27 85 125 \
     --vg-points 80 --vd-points 80
 
-# Quick test (minimal grid)
+# Quick test (single default geometry, minimal grid)
 python scripts/generate_training_data.py \
     --osdi build/osdi/bsimcmg.osdi \
     --tech ASAP7 --devices nmos_rvt \
-    --l-multipliers 1 --nfins 1 --temps 27 \
+    --no-sweep-geometry --temps 27 \
     --vg-points 5 --vd-points 5
 
 # List available devices
 python scripts/generate_training_data.py \
     --osdi build/osdi/bsimcmg.osdi --list-devices
 ```
+
+By default, `--sweep-geometry` is enabled: the sweep enumerates all PDK-defined (L, NFIN) bin boundary combinations from the technology modelcard. Use `--no-sweep-geometry` for a single (min_l, 1) point per device.
 
 ### Python API: One-Liner
 
@@ -147,9 +147,8 @@ from pycmg.sweep import SweepConfig, sweep_dc, to_csv
 
 config = SweepConfig(
     techs=["ASAP7", "TSMC7"],
-    l_multipliers=[1.0, 2.0, 3.0],
-    nfins=[1.0, 2.0],
-    temperatures=[300.15, 358.15],  # 27C, 85C in Kelvin
+    sweep_geometry=True,              # use PDK-defined (L, NFIN) combos
+    temperatures=[300.15, 358.15],    # 27C, 85C in Kelvin
     vg_points=80,
     vd_points=80,
 )
@@ -157,6 +156,24 @@ config = SweepConfig(
 result = sweep_dc("build/osdi/bsimcmg.osdi", config, verbose=2)
 paths = to_csv(result, "./training_data", split_by="tech")
 ```
+
+### PDK-Defined Geometry Sweep
+
+TSMC PDKs organize model variants as a 2D grid of (L_bin x NFIN_group), where each combination has specifically fitted binning coefficients. The sweep engine reads these bin boundaries directly from the PDK file:
+
+```python
+from pycmg import scan_pdk_geometry_combos
+
+# Enumerate all (L, NFIN) sweep points for TSMC7 PMOS LVT
+combos = scan_pdk_geometry_combos(
+    "modelcards/TSMC7/cln7_1d8_sp_v1d2_2p2.l",
+    "pch_lvt_mac",
+)
+# Returns 42 (L, NFIN) pairs: 6 L bins x 7 unique NFIN boundaries
+# [(8e-9, 1.0), (8e-9, 2.0), ..., (1.2e-7, 24.888)]
+```
+
+For each variant, the sweep generates two points using `{nfinmin, nfinmax}` boundaries. This ensures correct binning coefficients are used for every (L, NFIN) combination.
 
 ### Process Variation
 
@@ -172,6 +189,89 @@ python scripts/generate_training_data.py \
 
 Process variation parameters are passed as `model_overrides` to `Instance`, overriding the modelcard value for each combination in the Cartesian product. The resulting CSV includes extra columns for each varied parameter.
 
+### Extended Voltage Range (2*VDD)
+
+For NN models used in circuit simulators, the Newton-Raphson solver may temporarily evaluate voltages beyond the nominal VDD. Training data covering `[0, 2*VDD]` prevents the NN from extrapolating in these regions:
+
+```bash
+# Extend voltage sweep to 2x VDD
+python scripts/generate_training_data.py \
+    --osdi build/osdi/bsimcmg.osdi \
+    --tech ASAP7 --devices nmos_rvt \
+    --voltage-scale 2.0
+
+# Or via Python API
+from pycmg import generate_dataset
+paths = generate_dataset(
+    osdi_path="build/osdi/bsimcmg.osdi",
+    techs=["ASAP7"],
+    voltage_scale=2.0,
+)
+```
+
+The dense region around Vth keeps the same width regardless of `voltage_scale` -- only the sparse grid and Vd grid extend to `VDD * voltage_scale`.
+
+### Sensitivity Analysis: Finding Dominant Process Parameters
+
+Before modeling process variation, identify which parameters matter most. The sensitivity analysis tool perturbs each BSIM-CMG model parameter independently and ranks them by influence on I-V, Q-V, and C-V characteristics:
+
+```bash
+# Identify top 9 process parameters for ASAP7 NMOS
+python scripts/sensitivity_analysis.py \
+    --osdi build/osdi/bsimcmg.osdi \
+    --tech ASAP7 --device nmos_rvt
+
+# Custom: TSMC5, 10% perturbation, top 15
+python scripts/sensitivity_analysis.py \
+    --osdi build/osdi/bsimcmg.osdi \
+    --tech TSMC5 --device nmos_svt \
+    --delta 0.10 --top-n 15
+
+# Save full results to CSV
+python scripts/sensitivity_analysis.py \
+    --osdi build/osdi/bsimcmg.osdi \
+    --tech ASAP7 --device nmos_rvt \
+    --output sensitivity_results.csv
+```
+
+**Example output** (TSMC5 nmos_svt):
+
+```
+=== I-V Sensitivity (top 9) ===
+Rank  Parameter      ids       gm        gds       gmb       Score
+1     phig           2.04e+01  3.16e+03  3.21e+03  5.13e+03  1.15e+04
+2     easub          1.91e+01  2.42e+03  2.44e+03  3.23e+03  8.10e+03
+3     nu0            2.13e+00  2.82e+00  2.83e+00  2.85e+00  1.06e+01
+...
+```
+
+**Python API:**
+
+```python
+from pycmg import compute_sensitivity
+
+result = compute_sensitivity(
+    osdi_path="build/osdi/bsimcmg.osdi",
+    modelcard_path="modelcards/ASAP7/7nm_TT_160803.pm",
+    model_name="nmos_rvt",
+    inst_params={"L": 21e-9, "TFIN": 6.5e-9, "NFIN": 1.0},
+    vdd=0.9,
+    device_type="nmos",
+    delta_fraction=0.05,  # 5% perturbation
+    top_n=9,
+)
+
+# Top 9 parameters for each category
+print(result.rankings["iv"])  # I-V: ['phig', 'easub', ...]
+print(result.rankings["qv"])  # Q-V: ['phig', 'easub', ...]
+print(result.rankings["cv"])  # C-V: ['phig', 'easub', ...]
+
+# Full sensitivity data per parameter per output
+print(result.sensitivities["phig"])  # {'ids': 94.02, 'gm': 29.70, ...}
+```
+
+The analysis evaluates at 4 representative bias points (subthreshold, linear, saturation, strong inversion) using central-difference perturbation and normalized sensitivity.
+
 ## Supported Technologies
 
 | Technology | Node | Vdd | TFIN | Vt Flavors | Devices |
@@ -185,7 +285,7 @@ Process variation parameters are passed as `model_overrides` to `Instance`, over
 
 Each "device" is an NMOS/PMOS pair for a given Vt flavor. For example, ASAP7 has 4 flavors x 2 polarities = 8 devices: `nmos_rvt`, `pmos_rvt`, `nmos_lvt`, `pmos_lvt`, etc.
 
-Minimum gate lengths are auto-detected from modelcards (ASAP7) or PDK files (TSMC). Gate length sweeps use multipliers (default: 1x, 2x, 3x, 4x, 5x) applied to each device's minimum L.
+Gate lengths and NFIN ranges are defined by PDK bin boundaries. The sweep engine reads these directly from the TSMC PDK files (discrete lmin values and nfinmin/nfinmax groups). For ASAP7, TSMC7's NFIN boundaries are used as reference.
 
 ## Output Format
 
@@ -207,16 +307,7 @@ When `--process-var` is used, the varied parameter columns (e.g., `eot`, `toxp`)
 
 ### Dataset Size Estimates
 
-With default sweep settings (5 L-multipliers, 3 NFINs, 5 temperatures, 50x50 voltage grid):
-
-| Technology | Devices | Rows (approx.) | CSV Size |
-|------------|---------|-----------------|----------|
-| ASAP7 | 8 | 3.0M | ~600MB |
-| TSMC5 | 8 | 3.0M | ~600MB |
-| TSMC7 | 6 | 2.2M | ~450MB |
-| TSMC12 | 10 | 3.7M | ~750MB |
-| TSMC16 | 10 | 3.7M | ~750MB |
-| All | 42 | 15.7M | ~3.2GB |
+With default settings (`sweep_geometry=True`, 5 temperatures, 50x50 voltage grid), data size depends on each technology's PDK variant structure. TSMC nodes typically have 25-42 geometry combos per device, ASAP7 has 6-7 (one L, TSMC7 NFIN boundaries).
 
 ### Non-Uniform Voltage Sampling
 
@@ -345,7 +436,13 @@ Build your own voltage grid for finer control:
 from pycmg.sweep import build_voltage_grid, find_threshold, build_nodes
 
 vth = find_threshold(inst, vdd=0.9, device_type="nmos")
+
+# Standard range [0, VDD]
 vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=100, vd_points=100)
+
+# Extended range [0, 2*VDD] for simulator convergence training
+vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=100, vd_points=100,
+                                     voltage_scale=2.0)
 
 for vg in vg_arr:
     for vd in vd_arr:
@@ -425,7 +522,7 @@ pytest tests/test_dc_jacobian.py tests/test_dc_regions.py tests/test_transient.p
 # Vt variant verification (16 additional Vt flavors)
 pytest tests/test_vt_variants.py -v
 
-# Full suite (293 tests)
+# Full suite (333 tests)
 pytest tests/ -v
 ```
 
@@ -452,16 +549,18 @@ pycmg-wrapper/
 │   ├── __init__.py              # Public API exports (Model, Instance, generate_dataset, ...)
 │   ├── osdi_types.py            # OSDI constants, ctypes structures, function types
 │   ├── core.py                  # Low-level OSDI interface (OsdiLibrary, OsdiModel, OsdiInstance)
-│   ├── parser.py                # Modelcard parsing (parse_modelcard, parse_number_with_suffix)
+│   ├── parser.py                # Modelcard parsing, PDK introspection (scan_pdk_geometry_combos)
 │   ├── model.py                 # Public API (Model, Instance, eval_dc, eval_tran)
 │   ├── tech.py                  # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig)
-│   └── sweep.py                 # Sweep engine (generate_dataset, SweepConfig, sweep_dc, to_csv)
-├── tests/                        # Test suite (293 tests)
+│   ├── sweep.py                 # Sweep engine (generate_dataset, SweepConfig, sweep_dc, to_csv)
+│   └── sensitivity.py           # Sensitivity analysis (compute_sensitivity, SensitivityResult)
+├── tests/                        # Test suite (333 tests)
 │   ├── conftest.py              # Tiered technology registry (21 entries)
 │   ├── helpers.py               # NGSPICE runner helpers, comparison functions
 │   ├── test_api.py              # API smoke tests
 │   ├── test_tech.py             # Technology registry tests
-│   ├── test_sweep.py            # Sweep engine tests
+│   ├── test_sweep.py            # Sweep engine tests (incl. voltage_scale)
+│   ├── test_sensitivity.py      # Sensitivity analysis tests
 │   ├── test_dc_jacobian.py      # DC Jacobian verification
 │   ├── test_dc_regions.py       # DC operating region tests
 │   ├── test_transient.py        # Transient waveform verification
@@ -473,6 +572,7 @@ pycmg-wrapper/
 │   └── test_vt_variants.py      # Vt variant DC verification
 ├── scripts/                      # CLI utilities
 │   ├── generate_training_data.py # Training data generation CLI
+│   ├── sensitivity_analysis.py  # Process parameter sensitivity CLI
 │   └── generate_naive_tsmc.py   # Naive TSMC modelcard generator
 ├── modelcards/                   # Technology model cards
 │   ├── ASAP7/                   # ASAP7 PDK model files
@@ -494,15 +594,15 @@ pycmg-wrapper/
 
 **`generate_dataset(osdi_path, techs, devices, output_dir, ...)`** -- Convenience wrapper. Builds a `SweepConfig`, runs `sweep_dc()`, writes CSVs via `to_csv()`. Returns list of output file paths.
 
-**`SweepConfig`** -- Dataclass configuring the full sweep: `techs`, `devices`, `l_multipliers`, `nfins`, `temperatures`, `vg_points`, `vd_points`, `ve_values`, `process_vars`, `dense_ratio`.
+**`SweepConfig`** -- Dataclass configuring the full sweep: `techs`, `devices`, `sweep_geometry` (bool, default True), `temperatures`, `vg_points`, `vd_points`, `ve_values`, `process_vars`, `dense_ratio`, `voltage_scale`.
 
 **`SweepResult`** -- Container with `columns` (ordered column names), `data` (list of rows), `metadata` (timing, counts).
 
-**`sweep_dc(osdi_path, config, verbose)`** -- Core sweep loop. Iterates technologies x devices x lengths x NFINs x temperatures x process combos x voltage grid. Returns `SweepResult`.
+**`sweep_dc(osdi_path, config, verbose)`** -- Core sweep loop. When `sweep_geometry=True`, iterates technologies x devices x PDK-defined (L, NFIN) combos x temperatures x process combos x voltage grid. Returns `SweepResult`.
 
 **`to_csv(results, output_dir, split_by)`** -- Writes `SweepResult` to CSV files. `split_by` controls grouping: `"tech"` (default), `"device"`, or `"none"`.
 
-**`build_voltage_grid(vdd, vth_mag, vg_points, vd_points, dense_ratio)`** -- Non-uniform Vg + uniform Vd grid builder.
+**`build_voltage_grid(vdd, vth_mag, vg_points, vd_points, dense_ratio, voltage_scale)`** -- Non-uniform Vg + uniform Vd grid builder. `voltage_scale` extends the grid to `vdd * voltage_scale` (default 1.0).
 
 **`find_threshold(inst, vdd, device_type, n_coarse)`** -- Peak-gm threshold detection.
 
@@ -525,17 +625,31 @@ pycmg-wrapper/
 
 **`TechConfig`** -- Technology node config: `name`, `vdd`, `tfin`, `devices` (dict of `DeviceConfig`), `pdk_path`.
 
-**`DeviceConfig`** -- Single device config: `model_name`, `inst_params`, `modelcard`, `pdk_device`, `get_min_l()`.
+**`DeviceConfig`** -- Single device config: `model_name`, `inst_params`, `modelcard`, `pdk_device`, `get_min_l()`, `get_geometry_combos()`.
 
-**`resolve_modelcard(device, tech, L)`** -- Returns modelcard path. For ASAP7, returns the static file. For TSMC, generates a naive modelcard from the PDK on-the-fly and caches it under `build/modelcards/`.
+**`resolve_modelcard(device, tech, L, NFIN=None)`** -- Returns modelcard path. For ASAP7, returns the static file. For TSMC, generates a naive modelcard from the PDK on-the-fly and caches it under `build/modelcards/`. When `NFIN` is provided, selects the correct NFIN-group variant.
 
 **`get_tech_config(name)`** / **`list_techs()`** -- Registry lookup helpers.
+
+### pycmg.sensitivity
+
+**`compute_sensitivity(osdi_path, modelcard_path, model_name, inst_params, vdd, device_type, temperature, delta_fraction, top_n, verbose)`** -- OAT sensitivity analysis. Perturbs each real-valued model parameter by `+/- delta_fraction` and measures normalized output change at 4 representative bias points. Returns `SensitivityResult`.
+
+**`SensitivityResult`** -- Container with `param_names`, `sensitivities` (per-param per-output normalized sensitivity), `rankings` (per-category top-N lists: `"iv"`, `"qv"`, `"cv"`), `bias_points`, `delta_fraction`.
+
+**`enumerate_model_params(desc, model)`** -- Discovers all real-valued model-level parameters from the OSDI descriptor. Returns list of `ParamInfo(index, name, value)`.
+
+**`rank_parameters(sensitivities, categories, top_n)`** -- Ranks parameters by aggregate sensitivity within each output category.
+
+**`format_sensitivity_table(result, category)`** -- Formats a ranked sensitivity table for terminal output.
 
 ### pycmg.parser
 
 **`parse_modelcard(path, target_model_name)`** -- Parses a SPICE `.model` block. Returns `ParsedModel` with `name` and `params` dict.
 
 **`parse_number_with_suffix(s)`** -- Parses SPICE numbers with engineering suffixes (e.g., `"16n"` -> `16e-9`, `"1.5meg"` -> `1.5e6`).
+
+**`scan_pdk_geometry_combos(path, base_name)`** -- Enumerates PDK-defined (L, NFIN) sweep points for a TSMC device. For each variant, returns `(lmin, nfinmin)` and `(lmin, nfinmax)`. Sorted and deduplicated.
 
 ## License
 
