@@ -38,7 +38,7 @@ pycmg-wrapper/
 │   ├── tech.py              # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig, resolve_modelcard)
 │   ├── sweep.py             # Sweep engine (SweepConfig, sweep_dc, generate_dataset, to_csv)
 │   └── sensitivity.py       # OAT sensitivity analysis (compute_sensitivity, enumerate_model_params)
-├── tests/                    # Test suite (333 tests)
+├── tests/                    # Test suite (340 tests)
 │   ├── __init__.py          # Package init
 │   ├── conftest.py          # Tiered technology registry (5 base + 16 Vt variants = 21 total)
 │   ├── helpers.py           # NGSPICE runner helpers, comparison functions, modelcard baking
@@ -122,7 +122,7 @@ pycmg-wrapper/
   - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params from ALL_TECHNOLOGIES
   - `TECH_NAMES` / `CORE_VT_NAMES` / `ALL_TECH_NAMES`: Lists for test parametrization
 
-* **`tests/`**: Test suite (333 tests total)
+* **`tests/`**: Test suite (340 tests total)
   - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
   - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 base technologies
   - `test_dc_regions.py`: DC operating region tests, NMOS+PMOS across all 5 base technologies
@@ -275,150 +275,31 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     * If you want to try multiple solutions, use multiple subagents, git commit to different branches. Roll back and to the main branch and create new branch when the subagent find it's a dead end.
 * Enable the "Explanatory" or "Learning" output style in /config to explain the *why* behind its changes.
 
-## Lessons from Bugs (Keep Coming)
+## Design Principles & Known Constraints
 
-### TSMC PMOS NFIN-Group Variant Selection Bug (2026-03-31)
+### TSMC PDK Variant Selection
+- TSMC PDK variants are indexed by **both** L range (lmin/lmax) **and** NFIN range (nfinmin/nfinmax). Any function that selects a variant must match on both dimensions. `_scan_all_variants()` is the single source of truth for parsing variant metadata.
 
-- **Bug**: `_find_length_variant()` in `pycmg/parser.py` only matched on L (lmin/lmax), ignoring NFIN (nfinmin/nfinmax). TSMC PDKs organize variants as a 2D grid of (L_bin x NFIN_group). The function returned the first L match, which for PMOS was the highest NFIN group (e.g., nfinmin=20 for TSMC7 pch), causing wrong binning coefficients when actual NFIN was small (1-3).
+### Capacitance Sign Convention
+- The OSDI reactive Jacobian (dQ/dV) uses **Y-matrix convention** where off-diagonal entries are negative. SPICE capacitance variables (cgd, cgs, cdg) use the **opposite** sign. Off-diagonal entries must be negated when extracting from the condensed matrix; diagonal entries (cgg, cdd) need no sign flip.
 
-- **Root cause**: TSMC7 pch_lvt_mac has 36 variants: 6 L bins x 6 NFIN groups. Multiple variants share the same lmin/lmax but have different nfinmin/nfinmax. Without NFIN matching, variant 5 (nfinmin=20) was always selected for L=16nm, even when NFIN=1 needed variant 35 (nfinmin=1).
+### NGSPICE OSDI Limitations
+- **No instance-line parameters**: NGSPICE OSDI cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters must be **baked into the `.model` block**.
+- **Multi-model files**: When a modelcard contains multiple `.model` blocks, `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed.
+- **TSMC PDK sentinel values**: TSMC PDKs use `-999*10^n` as "use default" markers. These are filtered during naive modelcard generation (abs > 1e9 and string starts with "999").
 
-- **Fix**: Added `NFIN: Optional[float]` parameter to `_find_length_variant()` and threaded it through `parse_tsmc_pdk()` → `generate_naive_tsmc_modelcard()` → `resolve_modelcard()`. Added `_scan_all_variants()` helper and `scan_pdk_geometry_combos()` for PDK introspection. Replaced `SweepConfig.l_multipliers`/`nfins` with `sweep_geometry: bool` flag that enumerates PDK-defined (lmin, nfinmin) and (lmin, nfinmax) pairs.
+### OSDI Parameter Access Flags
+- Use `ACCESS_FLAG_SET` (1), **not** `ACCESS_FLAG_READ` (0), for reading model parameter values from the OSDI buffer. `ACCESS_FLAG_READ` returns null for parameters not explicitly written. Ensure `enumerate_model_params()` is called AFTER creating a baseline `Instance`.
 
-- **Design**: Gate lengths and NFIN ranges are binned into PDK-defined discrete values. The sweep now uses these discrete (L, NFIN) combinations directly from the PDK variant structure, not arbitrary user-defined multipliers. For ASAP7 (no binning), TSMC7's NFIN boundaries are used as reference, matched per device type.
+### Extended Voltage Range Design
+- Extended voltage sweep uses `voltage_scale` multiplier (default 1.0) relative to VDD.
+- The dense region around Vth must use `±0.15*vdd` (nominal VDD), NOT `±0.15*v_max`. Threshold voltage is a physical property independent of sweep range.
+- When `voltage_scale=2.0`, PMOS gets negative gate voltages (deep accumulation regime). BSIM-CMG handles this correctly.
 
-- **Lesson**: TSMC PDK variants are indexed by BOTH L range AND NFIN range. Any function that selects a variant must match on both dimensions, not just L. The `_scan_all_variants()` function now provides a single point of truth for parsing variant metadata.
-
-### Capacitance Sign Convention in _condense_caps() (2026-02-19)
-
-- **Bug**: Off-diagonal capacitances (cgd, cgs, cdg) returned by `_condense_caps()` in `pycmg/model.py` (formerly `pycmg/ctypes_host.py`) had the wrong sign, causing mismatches against NGSPICE `@n1[cXX]` operating-point variables.
-
-- **Root cause**: The OSDI reactive Jacobian (dQ/dV) uses **Y-matrix convention**, where off-diagonal entries are negative (e.g., `dQg/dVd < 0`). However, SPICE capacitance variables like `@n1[cgd]` use the **opposite sign convention** for off-diagonals — they report `cgd = -dQg/dVd > 0`. The `_condense_caps()` function was extracting raw matrix entries without applying this sign flip.
-
-- **Fix**: Negate off-diagonal entries when extracting from the condensed capacitance matrix:
-  ```python
-  # Diagonal: no negation
-  caps["cgg"] = float(c_condensed[g, g])
-  caps["cdd"] = float(c_condensed[d, d])
-  # Off-diagonal: negate to match SPICE convention
-  caps["cgd"] = -float(c_condensed[g, d])
-  caps["cgs"] = -float(c_condensed[g, s])
-  caps["cdg"] = -float(c_condensed[d, g])
-  ```
-
-- **Lesson**: When extracting small-signal parameters from OSDI Jacobian matrices, always verify sign conventions against NGSPICE. The OSDI binary returns raw matrix entries in Y-matrix convention; SPICE tools may present them with different signs. Diagonal elements (cgg, cdd) are always positive and need no sign flip. Off-diagonal elements (cgd, cgs, cdg) require negation to match SPICE convention.
-
-- **Testing**: Added `test_ac_caps.py` with `run_ngspice_ac()` helper in `tests/helpers.py` (formerly `pycmg/testing.py`) to verify all 5 capacitance elements across all 5 technologies.
-
-### PMOS Transient Netlist Generation (2026-02-19)
-
-- **Issue**: `run_ngspice_transient()` only generated NMOS-style netlists (drain at Vdd, source at 0V, gate pulse from 0 to Vdd). PMOS requires inverted biasing: drain at 0V, source at Vdd, gate pulse from Vdd to 0V.
-
-- **Fix**: Added `device_type: str = "nmos"` parameter to `run_ngspice_transient()`. When `device_type="pmos"`, the netlist swaps drain/source voltage sources and inverts the gate pulse direction.
-
-### Multi-Technology Verification & NGSPICE OSDI Limitations (2026-02-14)
-
-- **NGSPICE OSDI does NOT support instance-line parameters**: Unlike HSPICE or Spectre, NGSPICE's OSDI interface cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters (L, TFIN, NFIN) must be **baked into the `.model` block** in the modelcard file.
-
-- **Modelcard baking for NGSPICE**: The `_bake_inst_params_into_modelcard()` function in `tests/helpers.py` (formerly `pycmg/testing.py`) inserts instance params before the closing `)` of the `.model` block. Critical: detect `stripped == ')'` to insert BEFORE the bracket, not after.
-
-- **PMOS DEVTYPE in multi-model files**: When a modelcard contains multiple `.model` blocks (e.g., NMOS + PMOS in one file), `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed. Otherwise PMOS inherits DEVTYPE=1 from the first (NMOS) model, causing inverted behavior.
-
-- **TSMC7 PMOS L=16nm NGSPICE convergence failure**: At L=16nm, TSMC7 PMOS naive modelcards have binning parameters that produce invalid `PDIBL2_i=-0.118`, causing NGSPICE "Timestep too small" DC convergence failure. PyCMG single-shot evaluation doesn't fail (no iterative solver), making comparison impossible. **Workaround**: Use L=20nm or larger for PMOS verification.
-
-- **Stale test files with `sys.exit(1)`**: Module-level `sys.exit(1)` calls in test files crash pytest collection for the entire `tests/` directory. Clean up stale/scratch test files before running `pytest tests/`.
-
-- **TSMC7 naive modelcards**: Use `nch_svt_mac_l16nm.l` (NMOS) and `pch_lvt_mac_l20nm.l` (PMOS). These contain pre-baked geometric params but require additional instance-param injection for NGSPICE compatibility.
-
-- **TSMC PDK sentinel values**: TSMC PDKs use `-999*10^n` (e.g., `cth0 = -99900000000.0`) as "use default" markers. These extreme values cause OSDI "Parameter CTH0 is out of bounds!" errors during init. **Fix**: `scripts/generate_naive_tsmc.py` filters sentinel values (abs > 1e9 and string starts with "999") during naive modelcard generation. TSMC5 was the only node affected (CTH0 sentinel); TSMC7/12/16 had no sentinels.
-
-- **Multi-node naive modelcard generation**: `scripts/generate_naive_tsmc.py` supports all 4 TSMC FinFET nodes (TSMC5/7/12/16) with `--tech`, `--pdk`, `--output`, `--devices`, `--lengths` arguments. Uses `_extract_model_params()` and `_find_length_variant()` from `pycmg.parser` (formerly `pycmg.ctypes_host`) to merge `.global` + variant parameters.
-
-### ASAP7 Deep Dive Analysis (2026-02-13 Round 3)
-- **Critical parameter storage bug**: Both `parse_modelcard()` and `_extract_model_params()` stored parameters with original case (e.g., "EOT", "L", "NFIN") instead of lowercase. This caused parameter lookup failures when the code tried to access them using lowercase comparisons. Fixed by storing all parameters as lowercase: `parsed_params[_to_lower(key)] = parsed`.
-- **nfin default value bug**: The `nfin` default value (1.0) was set but never stored back to `parsed_params` because the code had a double-assignment pattern that left the last conditional branch without a storage statement. Fixed by using a single assignment at the end after all conditionals.
-- **ASAP7 path configuration**: Test file had hardcoded path `asap7_pdk_r1p7/models/hspice` but actual directory is `ASAP7`. Fixed by updating path.
-- **ASAP7 PMOS DEVTYPE issue RESOLVED**: PMOS models exhibited inverted behavior (conducted at positive Vg) due to missing `devtype` parameter. Standard ASAP7 files omit this parameter. Fixed by auto-injecting `devtype=0.0` for PMOS and `devtype=1.0` for NMOS in `parse_modelcard()` and `_extract_model_params()`. Original modelcard files remain unmodified.
-- **Test infrastructure gap**: ASAP7 tests only verify NMOS devices; PMOS verification tests can now be added since DEVTYPE issue is resolved.
-
-### ASAP7 PMOS DEVTYPE Auto-Injection (2026-02-13 Round 4)
-
-- **DEVTYPE auto-injection**: BSIM-CMG v107 uses integer parameter `DEVTYPE = 1` for NMOS (ntype) and `DEVTYPE = 0` for PMOS (ptype) to distinguish device types. Standard ASAP7 modelcards omit this parameter, causing PMOS models to conduct at positive Vg instead of negative Vg (inverted behavior).
-
-- **Solution**: Implemented automatic DEVTYPE injection in both `parse_modelcard()` and `_extract_model_params()` functions:
-
-  - Detects if `devtype` is missing from parsed parameters
-
-  - For PMOS models: injects `devtype = 0.0`
-
-  - For NMOS models: injects `devtype = 1.0`
-
-- **Implementation**: Applied to both ASAP7 and TSMC parsing functions for consistency
-
-- **Result**: Original ASAP7 modelcard files remain unmodified; PMOS models now work correctly without manual workarounds
-
-- **Verification**: DEVTYPE injection verified via Python tests; all verification tests use the technology registry
-
-
-### Modelcard Parsing & Parameter Handling (2026-02-13 Round 1)
-- **Double assignment bug in `_parse_params()`**: The original code had `parsed_params[key] = parsed` followed by conditional blocks that modified `parsed` without storing back. This caused `nfin` defaults to never be applied. Fixed by using `if-elif-elif` chain with single assignment at end.
-- **SPICE suffix capture**: When updating regex patterns, ensure the `[a-zA-Z]*` suffix pattern remains INSIDE the value capture group, otherwise suffixes like `n`, `p`, `u` are lost during parsing.
-- **Scientific notation regex**: The pattern `[0-9eE+\-\.]+` was fragile because it matched `+` and `-` in any position. Use `[0-9]*\.?[0-9]+(?:[eE][+\-]?[0-9]+)?` for proper scientific notation.
-- **EOTACC clamping inconsistency**: Different thresholds were used in `parse_modelcard()` vs `_make_ngspice_modelcard()`. Standardized to `<= 1.0e-10` -> `1.1e-10` across all locations (Python, C++ CLI, C++ bindings).
-- **Parameter validation**: Added checks for NaN, inf, and inappropriate negative values in `OsdiModel.set_param()` to prevent silent corruption.
-
-### Case Sensitivity & Parameter Storage (2026-02-13 Round 2)
-- **Case-insensitive parameter storage**: Both `parse_modelcard()` and `_extract_model_params()` were storing parameters with original case from files, but used `_to_lower()` for comparisons. This caused lookup failures. Fixed by storing all parameters as lowercase keys: `params[_to_lower(key)] = parsed`.
-- **TSMC7 PDK robustness**: Added explicit `.global` variant handling in `_find_length_variant()` with warning messages for unexpected non-numeric suffixes. Improved error messages when `.global` model is missing.
-
-### Testing & Verification (2026-02-13 Round 1)
-- **Assertion tolerance selection**: The `_assert_close()` function was using `ABS_TOL_I` (1e-9) for ALL parameters, but charges need `ABS_TOL_Q` (1e-18). Added auto-selection based on parameter name.
-- **Temperature list completeness**: Test documentation mentioned -40C but `TEST_TEMPS` list was missing it. Added -40.0C for comprehensive temperature coverage.
-- **Model file naming**: PVT_CORNERS dict used hard-coded `.pm` extensions that didn't match actual files. Changed to base patterns for glob matching.
-
-### Documentation (2026-02-13 Round 2)
-- **Temperature units documentation**: Added comprehensive docstrings explaining that ALL temperatures in the module are in KELVIN. Provided conversion formula `temp_K = temp_C + 273.15` and practical examples for common temperatures (-40C, 27C, 85C, 125C).
-- **Accessible documentation**: Users can now access via `help(pycmg.model)`, `help(pycmg.core)`, `help(Model)`, `help(Instance)`, etc.
-
-### Code Quality (2026-02-13 Round 1 & 2)
-- **Duplicate code removal**: Removed 33 lines of duplicate code in `_find_length_variant()` that was processing variants twice.
-- **Error handling**: Added helpful error messages in `parse_tsmc7_pdk()` when `.global` model is missing, with diagnostic information.
-
-### OSDI Parameter Access Flags for Reading Model Values (2026-03-31)
-
-- **Bug**: `enumerate_model_params()` in `pycmg/sensitivity.py` returned an empty list despite the model having 230+ parameters. The function used `ACCESS_FLAG_READ` (0) to obtain pointers to model parameter values.
-
-- **Root cause**: `ACCESS_FLAG_READ` (0) returns null pointers for model-level parameters that haven't been explicitly written through `apply_param()`. The `Model` constructor stores modelcard params in a Python dict (`_modelcard_params`) but does NOT apply them to the OSDI buffer — that only happens during `Instance.__init__()`. Even after Instance creation populates the buffer, `ACCESS_FLAG_READ` may still return null for some parameters.
-
-- **Fix**: Use `ACCESS_FLAG_SET` (1) instead of `ACCESS_FLAG_READ` (0) for reading model parameter values from the OSDI buffer. `ACCESS_FLAG_SET` is what `apply_param()` and `OsdiModel.set_param()` use, and it reliably returns valid pointers. The returned pointer can be dereferenced for reading just as well as writing.
-
-- **Lesson**: When reading OSDI model parameters via `desc.access()`, always use `ACCESS_FLAG_SET` (1), not `ACCESS_FLAG_READ` (0). Also, ensure `enumerate_model_params()` is called AFTER creating a baseline `Instance`, which triggers `apply_param()` for all modelcard values and populates the OSDI model buffer.
-
-### TSMC5 PMOS LVT Binning Parameter Failure (2026-03-31)
-
-- **Bug**: TSMC5 `pmos_lvt` produces NaN for all outputs at all tested gate lengths (min_l and 2x min_l). Sensitivity analysis returned all-zero rankings.
-
-- **Root cause**: The TSMC5 PMOS LVT naive modelcard generates invalid binning-derived internal parameters (similar to TSMC7 PMOS L=16nm PDIBL2 issue). Unlike single-shot evaluation failures that are silent, this affects the entire model — no valid bias point works.
-
-- **Workaround**: Use `pmos_svt` or `pmos_elvt` for TSMC5 PMOS sensitivity analysis instead of `pmos_lvt`. The sensitivity code now emits a warning when all baseline evaluations return NaN, guiding the user to try a different device or L multiplier.
-
-- **Lesson**: Not all TSMC naive modelcard + device + length combinations produce valid models. Before running sensitivity analysis or data generation on a new device, verify baseline evaluation works with a quick smoke test. The `scripts/sensitivity_analysis.py` tool now handles NaN baselines gracefully (warns instead of silently producing zeros).
-
-### Extended Voltage Range Design (2026-03-31)
-
-- **Design decision**: Extended voltage sweep uses a `voltage_scale` multiplier (default 1.0) rather than separate `vg_max`/`vd_max` parameters. This is cleaner because the extended range is always relative to the technology's VDD.
-
-- **Key insight**: The dense region around Vth must remain at `±0.15*vdd` (nominal VDD), NOT `±0.15*v_max`. Threshold voltage is a physical property that doesn't change when you extend the sweep range. Only the sparse grid upper bound and Vd upper bound use `v_max = vdd * voltage_scale`.
-
-- **PMOS handling**: When `voltage_scale=2.0`, `build_nodes()` produces negative gate voltages for PMOS (e.g., `Vg = vdd - 2*vdd = -vdd`). This is physically valid (deep accumulation regime) and BSIM-CMG handles it correctly. No special PMOS treatment needed.
-
-### Earlier Bugs
-- Modelcard parsing must handle spaced `PARAM = VALUE` and exponent `1e+22`; otherwise key params (NBODY/NSD/NSEG/GEOMOD) silently default and mismatch ngspice.
-- OSDI init out-of-bounds errors should be treated as warnings (matching ngspice behavior), not fatal.
+### OSDI Interaction Rules
+- OSDI init out-of-bounds errors should be treated as warnings (matching NGSPICE behavior), not fatal.
 - Some OSDI params are integer-typed; read/write using `PARA_TY_INT` to avoid garbage values.
-- Internal-node DC solve must use residuals/Jacobian with cleared buffers; once params are correct, residuals match ngspice currents.
 - Do not pass `prev_solve` to OSDI unless it is explicitly initialized; uninitialized `prev_solve` breaks DC/AC comparisons.
-- Stress tests must align NGSPICE sign conventions: compare `i(vx)` directly to pycmg currents (no sign flip) for OP.
 
 ## Gap Checklist (Inventory vs Workflow)
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
@@ -483,7 +364,7 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 | TSMC16_ulvt | TSMC16 | Ultra-Low Vt | 0.80V | nch_ulvt_mac | pch_ulvt_mac |
 | TSMC16_lnvt | TSMC16 | Low-Noise Vt | 0.80V | nch_lnvt_mac | pch_lnvt_mac |
 
-### Verification Test Types (266 tests total)
+### Verification Test Types
 
 | Test File | Coverage | Description |
 |-----------|----------|-------------|
@@ -491,7 +372,7 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 | `test_dc_regions.py` | 5 base techs, NMOS+PMOS | DC operating regions + gmb verification vs NGSPICE |
 | `test_transient.py` | 5 base techs, NMOS+PMOS | Transient charge/discharge waveforms vs NGSPICE |
 | `test_transient_vt.py` | 16 Vt variants, NMOS+PMOS | Transient waveforms vs NGSPICE (32 tests) |
-| `test_ac_caps.py` | 5 base techs, NMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
+| `test_ac_caps.py` | 5 base techs, NMOS+PMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
 | `test_body_bias.py` | 5 base techs, NMOS+PMOS | Body bias (Ve != 0) verification vs NGSPICE |
 | `test_temperature.py` | ASAP7, NMOS+PMOS | Temperature (-40C, 85C, 125C) verification vs NGSPICE |
 | `test_nfin_scaling.py` | ASAP7, NMOS+PMOS | NFIN scaling sanity (PyCMG-only, no NGSPICE) |
@@ -502,7 +383,6 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 
 - **Modelcard baking**: `_bake_inst_params_into_modelcard()` in `tests/helpers.py` injects instance params (L, TFIN, NFIN, DEVTYPE) before the closing `)` of the `.model` block
 - **NGSPICE OSDI limitation**: Cannot accept instance params on device line; must be in `.model` block
-- **PMOS L=16nm caveat**: For TSMC nodes, invalid binning parameters at L=16nm cause NGSPICE convergence failure; use L=20nm for PMOS
 - **Tolerances**: ABS_TOL_I=1e-9, ABS_TOL_Q=1e-18, ABS_TOL_C=1e-18 (capacitance), REL_TOL=5e-3, REL_TOL_CAP=1e-2 (1% for capacitance)
 - **DEVTYPE injection**: Automatic injection of devtype=1.0 (NMOS) or devtype=0.0 (PMOS) for models missing this parameter
 - **Sentinel filtering**: TSMC PDK sentinel values (-999*10^n) filtered during naive modelcard generation

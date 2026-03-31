@@ -522,23 +522,24 @@ pytest tests/test_dc_jacobian.py tests/test_dc_regions.py tests/test_transient.p
 # Vt variant verification (16 additional Vt flavors)
 pytest tests/test_vt_variants.py -v
 
-# Full suite (333 tests)
+# Full suite (340 tests)
 pytest tests/ -v
 ```
 
 | Test File | Tests | Description | NGSPICE |
 |-----------|-------|-------------|---------|
-| `test_api.py` | 13 | API smoke tests | No |
-| `test_tech.py` | 27 | Technology registry and config tests | No |
-| `test_sweep.py` | -- | Sweep engine tests | No |
+| `test_api.py` | 21 | API smoke tests | No |
+| `test_tech.py` | 13 | Technology registry and config tests | No |
+| `test_sweep.py` | 27 | Sweep engine tests | No |
 | `test_nfin_scaling.py` | 4 | NFIN scaling sanity | No |
+| `test_sensitivity.py` | 7 | Sensitivity analysis tests | No |
 | `test_dc_jacobian.py` | 30 | DC Jacobian (gm, gds, gmb) vs NGSPICE | Yes |
 | `test_dc_regions.py` | 50 | DC operating regions vs NGSPICE | Yes |
 | `test_transient.py` | 10 | Transient waveforms vs NGSPICE | Yes |
 | `test_transient_vt.py` | 32 | Transient Vt variants vs NGSPICE | Yes |
-| `test_ac_caps.py` | 5 | AC capacitances vs NGSPICE | Yes |
+| `test_ac_caps.py` | 20 | AC capacitances vs NGSPICE | Yes |
 | `test_body_bias.py` | 20 | Body bias verification vs NGSPICE | Yes |
-| `test_temperature.py` | 6 | Temperature sweep vs NGSPICE | Yes |
+| `test_temperature.py` | 10 | Temperature sweep vs NGSPICE | Yes |
 | `test_vt_variants.py` | 96 | Vt variant DC verification vs NGSPICE | Yes |
 
 ## Project Structure
@@ -554,7 +555,7 @@ pycmg-wrapper/
 │   ├── tech.py                  # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig)
 │   ├── sweep.py                 # Sweep engine (generate_dataset, SweepConfig, sweep_dc, to_csv)
 │   └── sensitivity.py           # Sensitivity analysis (compute_sensitivity, SensitivityResult)
-├── tests/                        # Test suite (333 tests)
+├── tests/                        # Test suite (340 tests)
 │   ├── conftest.py              # Tiered technology registry (21 entries)
 │   ├── helpers.py               # NGSPICE runner helpers, comparison functions
 │   ├── test_api.py              # API smoke tests
