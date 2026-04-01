@@ -110,27 +110,20 @@ def bake_inst_params(src: Path, dst: Path, model_name: str,
     dst.write_text("\n".join(lines) + "\n")
 
 
-def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any],
-                   vd: float, vg: float, vs: float = 0.0, ve: float = 0.0,
-                   temp_c: float = 27.0,
-                   tag: str = "op") -> Dict[str, float]:
-    """Run NGSPICE operating point analysis and return results.
+def _run_ngspice_op_query(
+    modelcard: Path, model_name: str, inst_params: Dict[str, Any],
+    vd: float, vg: float, vs: float, ve: float, temp_c: float,
+    wrdata_vars: str, output_map: Dict[str, str], tag: str,
+) -> Dict[str, float]:
+    """Shared helper: bake params, run NGSPICE .op, parse CSV output.
 
     Args:
-        modelcard: Path to modelcard file
-        model_name: Model name in the modelcard
-        inst_params: Instance parameters to bake
-        vd, vg, vs, ve: Terminal voltages
-        temp_c: Temperature in Celsius
-        tag: Unique tag for output files (prevents collisions in parallel runs)
-
-    Returns:
-        Dict with keys: id, ig, is, ie, qg, qd, qs, qb, gm, gds, gmb
+        wrdata_vars: Space-separated NGSPICE variables for wrdata command.
+        output_map: Maps result key -> NGSPICE header name.
     """
     out_dir = BUILD / "ngspice_eval" / tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Bake instance params into modelcard
     ng_modelcard = out_dir / f"ng_{model_name}.lib"
     bake_inst_params(modelcard, ng_modelcard, model_name, inst_params)
 
@@ -161,10 +154,7 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
         "set wr_vecnames\n"
         ".options saveinternals\n"
         "run\n"
-        f"wrdata {out_csv} v(g) v(d) v(s) v(e) "
-        "i(vg) i(vd) i(vs) i(ve) "
-        "@n1[qg] @n1[qd] @n1[qs] @n1[qb] "
-        "@n1[gm] @n1[gds] @n1[gmbs]\n"
+        f"wrdata {out_csv} {wrdata_vars}\n"
         ".endc\n"
         ".end\n"
     )
@@ -185,6 +175,11 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
             f"See log: {log_path}"
         )
 
+    if not out_csv.exists():
+        raise RuntimeError(
+            f"NGSPICE produced no output (tag={tag}). See log: {log_path}"
+        )
+
     with out_csv.open() as f:
         csv_lines = f.readlines()
         if not csv_lines:
@@ -192,119 +187,46 @@ def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any]
         headers = csv_lines[0].split()
         values = [float(x) for x in csv_lines[1].split()]
         idx_map = {name: i for i, name in enumerate(headers)}
-        return {
-            "id": values[idx_map["i(vd)"]],
-            "ig": values[idx_map["i(vg)"]],
-            "is": values[idx_map["i(vs)"]],
-            "ie": values[idx_map["i(ve)"]],
-            "qg": values[idx_map["@n1[qg]"]],
-            "qd": values[idx_map["@n1[qd]"]],
-            "qs": values[idx_map["@n1[qs]"]],
-            "qb": values[idx_map["@n1[qb]"]],
-            "gm": values[idx_map["@n1[gm]"]],
-            "gds": values[idx_map["@n1[gds]"]],
-            "gmb": values[idx_map["@n1[gmbs]"]],
-        }
+        return {key: values[idx_map[ng_name]] for key, ng_name in output_map.items()}
+
+
+# NGSPICE variable sets and output mappings for OP / AC queries
+_OP_WRDATA = (
+    "v(g) v(d) v(s) v(e) i(vg) i(vd) i(vs) i(ve) "
+    "@n1[qg] @n1[qd] @n1[qs] @n1[qb] @n1[gm] @n1[gds] @n1[gmbs]"
+)
+_OP_MAP: Dict[str, str] = {
+    "id": "i(vd)", "ig": "i(vg)", "is": "i(vs)", "ie": "i(ve)",
+    "qg": "@n1[qg]", "qd": "@n1[qd]", "qs": "@n1[qs]", "qb": "@n1[qb]",
+    "gm": "@n1[gm]", "gds": "@n1[gds]", "gmb": "@n1[gmbs]",
+}
+_AC_WRDATA = "@n1[cgg] @n1[cgd] @n1[cgs] @n1[cdg] @n1[cdd]"
+_AC_MAP: Dict[str, str] = {
+    "cgg": "@n1[cgg]", "cgd": "@n1[cgd]", "cgs": "@n1[cgs]",
+    "cdg": "@n1[cdg]", "cdd": "@n1[cdd]",
+}
+
+
+def run_ngspice_op(modelcard: Path, model_name: str, inst_params: Dict[str, Any],
+                   vd: float, vg: float, vs: float = 0.0, ve: float = 0.0,
+                   temp_c: float = 27.0,
+                   tag: str = "op") -> Dict[str, float]:
+    """Run NGSPICE operating point analysis and return currents/charges/derivatives."""
+    return _run_ngspice_op_query(
+        modelcard, model_name, inst_params, vd, vg, vs, ve, temp_c,
+        _OP_WRDATA, _OP_MAP, tag,
+    )
 
 
 def run_ngspice_ac(modelcard: Path, model_name: str, inst_params: Dict[str, Any],
                    vd: float, vg: float, vs: float = 0.0, ve: float = 0.0,
                    temp_c: float = 27.0,
                    tag: str = "ac") -> Dict[str, float]:
-    """Run NGSPICE AC capacitance extraction and return results.
-
-    Extracts cgg, cgd, cgs, cdg, cdd from NGSPICE operating point variables
-    after a DC solve. NGSPICE OSDI exposes these as @n1[cXX] variables which
-    are computed during the .op analysis (model-internal capacitances condensed
-    to external terminals by NGSPICE).
-
-    Args:
-        modelcard: Path to modelcard file
-        model_name: Model name in the modelcard
-        inst_params: Instance parameters to bake
-        vd, vg, vs, ve: Terminal voltages
-        temp_c: Temperature in Celsius
-        tag: Unique tag for output files (prevents collisions in parallel runs)
-
-    Returns:
-        Dict with keys: cgg, cgd, cgs, cdg, cdd
-    """
-    out_dir = BUILD / "ngspice_eval" / tag
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Bake instance params into modelcard
-    ng_modelcard = out_dir / f"ng_{model_name}.lib"
-    bake_inst_params(modelcard, ng_modelcard, model_name, inst_params)
-
-    net = [
-        "* AC cap extraction",
-        f'.include "{ng_modelcard}"',
-        f".temp {temp_c}",
-        f"Vd d 0 {vd}",
-        f"Vg g 0 {vg}",
-        f"Vs s 0 {vs}",
-        f"Ve e 0 {ve}",
-        f"N1 d g s e {model_name}",
-        ".op",
-        ".end",
-    ]
-
-    out_csv = out_dir / "ng_ac.csv"
-    net_path = out_dir / "netlist.cir"
-    log_path = out_dir / "ng_ac.log"
-    runner_path = out_dir / "runner.cir"
-
-    runner_path.write_text(
-        "* ngspice runner\n"
-        ".control\n"
-        f"osdi {OSDI_PATH}\n"
-        f"source {net_path}\n"
-        "set filetype=ascii\n"
-        "set wr_vecnames\n"
-        ".options saveinternals\n"
-        "run\n"
-        f"wrdata {out_csv} "
-        "@n1[cgg] @n1[cgd] @n1[cgs] @n1[cdg] @n1[cdd]\n"
-        ".endc\n"
-        ".end\n"
+    """Run NGSPICE AC capacitance extraction (cgg, cgd, cgs, cdg, cdd)."""
+    return _run_ngspice_op_query(
+        modelcard, model_name, inst_params, vd, vg, vs, ve, temp_c,
+        _AC_WRDATA, _AC_MAP, tag,
     )
-    net_path.write_text("\n".join(net))
-
-    try:
-        res = subprocess.run(
-            [NGSPICE_BIN, "-b", "-o", str(log_path), str(runner_path)],
-            capture_output=True, text=True, timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"NGSPICE timed out after 120s (tag={tag}). See log: {log_path}"
-        )
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"NGSPICE AC failed (tag={tag}):\n{res.stdout}\n{res.stderr}\n"
-            f"See log: {log_path}"
-        )
-
-    if not out_csv.exists():
-        raise RuntimeError(
-            f"NGSPICE AC produced no output (tag={tag}). "
-            f"@n1[cXX] variables may not be supported. See log: {log_path}"
-        )
-
-    with out_csv.open() as f:
-        csv_lines = f.readlines()
-        if not csv_lines:
-            raise RuntimeError(f"Empty NGSPICE AC output: {out_csv}")
-        headers = csv_lines[0].split()
-        values = [float(x) for x in csv_lines[1].split()]
-        idx_map = {name: i for i, name in enumerate(headers)}
-        return {
-            "cgg": values[idx_map["@n1[cgg]"]],
-            "cgd": values[idx_map["@n1[cgd]"]],
-            "cgs": values[idx_map["@n1[cgs]"]],
-            "cdg": values[idx_map["@n1[cdg]"]],
-            "cdd": values[idx_map["@n1[cdd]"]],
-        }
 
 
 def assert_close(label: str, py_val: float, ng_val: float,

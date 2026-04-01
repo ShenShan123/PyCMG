@@ -17,13 +17,19 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .osdi_types import _to_lower
 
 # Module-level regex for SPICE parameter assignment: NAME = VALUE[suffix]
 _ASSIGN_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"([+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)"
 )
+
+
+_SUFFIX_SCALE: Dict[str, float] = {
+    "t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3,
+    "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12,
+    "f": 1e-15, "a": 1e-18, "z": 1e-21, "y": 1e-24,
+}
 
 
 def parse_number_with_suffix(token: str) -> float:
@@ -37,30 +43,7 @@ def parse_number_with_suffix(token: str) -> float:
     if pos is not None:
         suffix = s[pos:].lower()
         s = s[:pos]
-        if suffix == "t":
-            scale = 1e12
-        elif suffix == "g":
-            scale = 1e9
-        elif suffix == "meg":
-            scale = 1e6
-        elif suffix == "k":
-            scale = 1e3
-        elif suffix == "m":
-            scale = 1e-3
-        elif suffix == "u":
-            scale = 1e-6
-        elif suffix == "n":
-            scale = 1e-9
-        elif suffix == "p":
-            scale = 1e-12
-        elif suffix == "f":
-            scale = 1e-15
-        elif suffix == "a":
-            scale = 1e-18
-        elif suffix == "z":
-            scale = 1e-21
-        elif suffix == "y":
-            scale = 1e-24
+        scale = _SUFFIX_SCALE.get(suffix, 1.0)
     if not s or s in {"+", "-"}:
         return 0.0
     return float(s) * scale
@@ -74,7 +57,7 @@ class ParsedModel:
 
 def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> ParsedModel:
     assign_re = _ASSIGN_RE
-    target_lower = _to_lower(target_model_name) if target_model_name else None
+    target_lower = target_model_name.lower() if target_model_name else None
 
     def _parse_params(lines: List[str]) -> Dict[str, float]:
         parsed_params: Dict[str, float] = {}
@@ -82,7 +65,7 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
             for match in assign_re.finditer(line):
                 key = match.group(1)
                 val = match.group(2)
-                key_lower = _to_lower(key)
+                key_lower = key.lower()
                 parsed = parse_number_with_suffix(val)
                 if key_lower == "eotacc" and parsed <= 1.0e-10:
                     parsed = 1.1e-10
@@ -94,13 +77,13 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
         return parsed_params
 
     def _is_valid_model(model_type: str, params: Dict[str, float]) -> bool:
-        mtype = _to_lower(model_type)
+        mtype = model_type.lower()
         if mtype == "bsimcmg":
             return True
         if mtype in {"nmos", "pmos"}:
             level = None
             for key, val in params.items():
-                if _to_lower(key) == "level":
+                if key.lower() == "level":
                     level = val
                     break
             return level == 72
@@ -143,13 +126,13 @@ def parse_modelcard(path: str, target_model_name: Optional[str] = None) -> Parse
             if len(parts) >= 3:
                 model_name = parts[1]
                 model_type = parts[2]
-                if target_lower is None or _to_lower(model_name) == target_lower:
+                if target_lower is None or model_name.lower() == target_lower:
                     params = _parse_params(block_lines)
                     if _is_valid_model(model_type, params):
                         # Inject DEVTYPE parameter for ASAP7 compatibility
                         # BSIM-CMG v107 uses DEVTYPE to distinguish NMOS (1) vs PMOS (0)
                         # ASAP7 modelcards often omit this, causing PMOS to behave incorrectly
-                        model_type_lower = _to_lower(model_type)
+                        model_type_lower = model_type.lower()
                         if "devtype" not in params:
                             if model_type_lower == "pmos":
                                 params["devtype"] = 0.0  # PMOS
@@ -413,10 +396,6 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.readlines()
 
-    # Build the exact pattern to match
-    # TSMC PDKs use format: .model nch_svt_mac.global nmos (
-    target_pattern = f".model {model_name} {expected_type}"
-
     idx = 0
     while idx < len(lines):
         raw = lines[idx]
@@ -453,7 +432,7 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
                     for match in assign_re.finditer(line):
                         key = match.group(1)
                         val = match.group(2)
-                        key_lower = _to_lower(key)
+                        key_lower = key.lower()
                         parsed = parse_number_with_suffix(val)
 
                         # Apply EOTACC clamping for OSDI compatibility
@@ -465,7 +444,7 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
                 # Inject DEVTYPE if not present (ASAP7 compatibility)
                 # TSMC7 typically has this, but provides safety net
                 if "devtype" not in params:
-                    expected_type_lower = _to_lower(expected_type)
+                    expected_type_lower = expected_type.lower()
                     if expected_type_lower == "pmos":
                         params["devtype"] = 0.0  # PMOS
                     elif expected_type_lower == "nmos":

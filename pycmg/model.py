@@ -1,30 +1,7 @@
-"""
-PyCMG ctypes-based OSDI interface -- public API
+"""PyCMG ctypes-based OSDI interface -- public API.
 
-TEMPERATURE UNITS:
-==================
-All temperature values in this module are in KELVIN (K).
-
-- Internal OSDI model temperature: KELVIN
-- Instance initialization temperature parameter: KELVIN
-- User-facing temperature API: KELVIN
-
-To convert from Celsius to Kelvin:
-    temp_K = temp_C + 273.15
-
-Example:
-    # Room temperature (25C) in Kelvin
-    temp_K = 25.0 + 273.15  # = 298.15 K
-
-    inst = Instance(model, params={"L": 16e-9}, temperature=298.15)
-
-Common temperatures:
-    -40C  ->  233.15 K  (cold start)
-      0C  ->  273.15 K  (freezing point)
-     25C  ->  298.15 K  (room temperature)
-     27C  ->  300.15 K  (TSMC typical)
-     85C  ->  358.15 K  (operating hot)
-    125C  ->  398.15 K  (max junction)
+All temperatures in this module are in **Kelvin**.
+Convert from Celsius: ``temp_K = temp_C + 273.15``.
 """
 
 from __future__ import annotations
@@ -57,7 +34,6 @@ from .osdi_types import (
     PARA_TY_MASK,
     PARA_TY_REAL,
     OsdiDescriptor,
-    _to_lower,
 )
 from .core import (
     OsdiInstance,
@@ -110,16 +86,6 @@ class Model:
             target = model_card_name if model_card_name else model_name
             parsed = parse_modelcard(modelcard_path, target)
             self._modelcard_params = dict(parsed.params)
-
-    def __enter__(self) -> "Model":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        pass  # cleanup handled by GC; explicit close() can be added later
-
-    def close(self) -> None:
-        """Release OSDI resources."""
-        pass  # Placeholder for future explicit cleanup
 
     @property
     def descriptor(self) -> OsdiDescriptor:
@@ -202,16 +168,6 @@ class Instance:
         self._prev_qs = 0.0
         self._prev_qb = 0.0
 
-    def __enter__(self) -> "Instance":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        pass
-
-    def close(self) -> None:
-        """Release instance resources."""
-        pass
-
     def set_params(self, params: Dict[str, float], allow_rebind: bool = False) -> None:
         for key, val in params.items():
             apply_param(self._model.descriptor, self._inst, self._model.model, key, val, False)
@@ -265,8 +221,8 @@ class Instance:
 
     def _read_opvar(self, name: str, alias: str) -> Optional[float]:
         desc = self._model.descriptor
-        name_lower = _to_lower(name)
-        alias_lower = _to_lower(alias)
+        name_lower = name.lower()
+        alias_lower = alias.lower()
         total = int(desc.num_params + desc.num_opvars)
         for i in range(total):
             param = desc.param_opvar[i]
@@ -275,14 +231,14 @@ class Instance:
             matched = False
             if param.num_alias == 0:
                 if param.name and param.name[0]:
-                    if _to_lower(param.name[0].decode("utf-8", errors="replace")) == name_lower:
+                    if param.name[0].decode("utf-8", errors="replace").lower() == name_lower:
                         matched = True
             else:
                 for a in range(param.num_alias):
                     alias_name = param.name[a]
                     if not alias_name:
                         continue
-                    alias_str = _to_lower(alias_name.decode("utf-8", errors="replace"))
+                    alias_str = alias_name.decode("utf-8", errors="replace").lower()
                     if alias_str in (name_lower, alias_lower):
                         matched = True
                         break
@@ -650,7 +606,3 @@ class Instance:
         if len(self._sim.state_prev) == len(self._sim.state_next):
             self._sim.state_prev, self._sim.state_next = self._sim.state_next, self._sim.state_prev
         return out
-
-
-
-__all__ = ["Model", "Instance", "parse_modelcard", "parse_number_with_suffix"]

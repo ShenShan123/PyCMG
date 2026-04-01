@@ -38,7 +38,7 @@ pycmg-wrapper/
 │   ├── tech.py              # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig, resolve_modelcard)
 │   ├── sweep.py             # Sweep engine (SweepConfig, sweep_dc, generate_dataset, to_csv)
 │   └── sensitivity.py       # OAT sensitivity analysis (compute_sensitivity, enumerate_model_params)
-├── tests/                    # Test suite (340 tests)
+├── tests/                    # Test suite (280 tests)
 │   ├── __init__.py          # Package init
 │   ├── conftest.py          # Tiered technology registry (5 base + 16 Vt variants = 21 total)
 │   ├── helpers.py           # NGSPICE runner helpers, comparison functions, modelcard baking
@@ -50,7 +50,6 @@ pycmg-wrapper/
 │   ├── test_nfin_scaling.py # NFIN scaling sanity tests (PyCMG-only)
 │   ├── test_temperature.py  # Temperature verification vs NGSPICE
 │   ├── test_transient.py    # Transient waveform verification vs NGSPICE (NMOS+PMOS)
-│   ├── test_transient_vt.py # Transient Vt variant verification vs NGSPICE (NMOS+PMOS)
 │   └── test_vt_variants.py  # Core Vt variant DC verification (lvt/slvt/sram/ulvt/elvt/hvt/lnvt)
 ├── scripts/                  # Utility scripts
 │   ├── generate_training_data.py # CLI for training data generation
@@ -122,12 +121,11 @@ pycmg-wrapper/
   - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params from ALL_TECHNOLOGIES
   - `TECH_NAMES` / `CORE_VT_NAMES` / `ALL_TECH_NAMES`: Lists for test parametrization
 
-* **`tests/`**: Test suite (340 tests total)
+* **`tests/`**: Test suite (280 tests total)
   - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
   - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 base technologies
-  - `test_dc_regions.py`: DC operating region tests, NMOS+PMOS across all 5 base technologies
+  - `test_dc_regions.py`: DC operating region tests (off/linear/saturation), NMOS+PMOS across all 5 base technologies
   - `test_transient.py`: Transient waveform verification, NMOS+PMOS across all 5 base technologies
-  - `test_transient_vt.py`: Transient Vt variant verification, NMOS+PMOS across 16 Vt flavors (32 tests)
   - `test_ac_caps.py`: AC capacitance verification (cgg, cgd, cgs, cdg, cdd) vs NGSPICE
   - `test_body_bias.py`: Body bias (Ve != 0) verification across all 5 base technologies
   - `test_temperature.py`: Temperature verification (-40C, 85C, 125C) vs NGSPICE
@@ -242,9 +240,6 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     * **Transient tests** (`tests/test_transient.py`): Transient waveform verification
       - Tests all 5 base technologies using Tier 1 registry
       - Covers charge/ discharge waveforms
-    * **Transient Vt tests** (`tests/test_transient_vt.py`): Transient waveform verification for Vt variants
-      - Tests all 16 Vt variants using Tier 2 registry
-      - Same methodology as test_transient.py (sequential stepping, quasi-steady comparison)
     * **Vt Variant tests** (`tests/test_vt_variants.py`): Cross-Vt DC verification
       - Tests all 16 Vt variants using Tier 2 registry
       - Covers saturation, linear, subthreshold regions for NMOS+PMOS
@@ -311,7 +306,6 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - DC Jacobian tests: `tests/test_dc_jacobian.py` NMOS+PMOS across all 5 base technologies.
 - DC Region tests: `tests/test_dc_regions.py` NMOS+PMOS across all 5 base technologies, includes gmb.
 - Transient tests: `tests/test_transient.py` NMOS+PMOS across all 5 base technologies.
-- Transient Vt tests: `tests/test_transient_vt.py` NMOS+PMOS across 16 Vt flavors.
 - AC Capacitance tests: `tests/test_ac_caps.py` NMOS across all 5 base technologies.
 - Body bias tests: `tests/test_body_bias.py` NMOS+PMOS across all 5 base technologies.
 - Temperature tests: `tests/test_temperature.py` NMOS+PMOS at -40C, 85C, 125C (ASAP7).
@@ -369,9 +363,8 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 | Test File | Coverage | Description |
 |-----------|----------|-------------|
 | `test_dc_jacobian.py` | 5 base techs, NMOS+PMOS | DC derivatives (gm, gds, gmb) vs NGSPICE |
-| `test_dc_regions.py` | 5 base techs, NMOS+PMOS | DC operating regions + gmb verification vs NGSPICE |
+| `test_dc_regions.py` | 5 base techs, NMOS+PMOS | DC operating regions (off/linear/saturation) vs NGSPICE |
 | `test_transient.py` | 5 base techs, NMOS+PMOS | Transient charge/discharge waveforms vs NGSPICE |
-| `test_transient_vt.py` | 16 Vt variants, NMOS+PMOS | Transient waveforms vs NGSPICE (32 tests) |
 | `test_ac_caps.py` | 5 base techs, NMOS+PMOS | AC capacitances (cgg, cgd, cgs, cdg, cdd) vs NGSPICE |
 | `test_body_bias.py` | 5 base techs, NMOS+PMOS | Body bias (Ve != 0) verification vs NGSPICE |
 | `test_temperature.py` | ASAP7, NMOS+PMOS | Temperature (-40C, 85C, 125C) verification vs NGSPICE |

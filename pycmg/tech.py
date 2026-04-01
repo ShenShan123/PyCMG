@@ -15,13 +15,13 @@ Usage::
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pycmg.parser import (
+    _ASSIGN_RE,
     _extract_model_params,
     _find_length_variant,
     _scan_all_variants,
@@ -31,12 +31,6 @@ from pycmg.parser import (
 
 # Project root for resolving relative modelcard/pdk paths
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-# Regex for key=value assignments in SPICE model blocks
-_ASSIGN_RE = re.compile(
-    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
-    r"([+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*)"
-)
 
 
 def _resolve_path(rel_path: str) -> Path:

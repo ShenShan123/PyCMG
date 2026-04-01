@@ -474,20 +474,6 @@ def test_eval_tran_negative_delta_t() -> None:
             Path(modelcard_path).unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
-def test_context_manager() -> None:
-    """Test that Model and Instance support context manager protocol."""
-    modelcard_path, model_name = _get_test_modelcard()
-    try:
-        with Model(str(OSDI_PATH), modelcard_path, model_name) as model:
-            assert model is not None
-            with Instance(model, params={"L": 16e-9, "TFIN": 8e-9, "NFIN": 2.0}) as inst:
-                result = inst.eval_dc({"d": 0.5, "g": 0.8, "s": 0.0, "e": 0.0})
-                assert "id" in result
-    finally:
-        if modelcard_path.startswith("/tmp/") and "tmp" in modelcard_path:
-            Path(modelcard_path).unlink(missing_ok=True)
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

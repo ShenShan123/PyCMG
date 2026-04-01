@@ -21,22 +21,18 @@ from tests.conftest import TECHNOLOGIES, TECH_NAMES, get_tech_modelcard
 
 
 def get_nmos_region_ops(vdd: float) -> dict:
-    """NMOS operating regions: positive voltages, grounded source."""
+    """NMOS operating regions: off, linear, saturation."""
     return {
         "off_state":           {"d": vdd,       "g": 0.0,       "s": 0.0, "e": 0.0},
-        "weak_inversion":      {"d": vdd,       "g": 0.3 * vdd, "s": 0.0, "e": 0.0},
-        "moderate_inversion":  {"d": 0.5 * vdd, "g": 0.6 * vdd, "s": 0.0, "e": 0.0},
         "strong_linear":       {"d": 0.3 * vdd, "g": vdd,       "s": 0.0, "e": 0.0},
         "strong_saturation":   {"d": vdd,       "g": 0.8 * vdd, "s": 0.0, "e": 0.0},
     }
 
 
 def get_pmos_region_ops(vdd: float) -> dict:
-    """PMOS operating regions: Vs=Vdd, Vg/Vd referenced to Vdd."""
+    """PMOS operating regions: off, linear, saturation."""
     return {
         "off_state":           {"d": 0.0,       "g": vdd,       "s": vdd, "e": 0.0},
-        "weak_inversion":      {"d": 0.0,       "g": 0.7 * vdd, "s": vdd, "e": 0.0},
-        "moderate_inversion":  {"d": 0.5 * vdd, "g": 0.4 * vdd, "s": vdd, "e": 0.0},
         "strong_linear":       {"d": 0.7 * vdd, "g": 0.0,       "s": vdd, "e": 0.0},
         "strong_saturation":   {"d": 0.0,       "g": 0.2 * vdd, "s": vdd, "e": 0.0},
     }

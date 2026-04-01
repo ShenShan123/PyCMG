@@ -50,7 +50,6 @@ from .osdi_types import (
     OsdiSimInfo,
     OsdiSimParas,
     _INSTANCE_NAME,
-    _to_lower,
 )
 
 
@@ -535,11 +534,34 @@ class OsdiInstance:
     def load_jacobian_tran(self, model: OsdiModel, sim: OsdiSimulation, alpha: float) -> None:
         self._desc.load_jacobian_tran(self._buf.ptr, model.data(), alpha)
 
+    def _nr_step(self, sim: OsdiSimulation, residual_vec: List[float]) -> bool:
+        """Single Newton-Raphson step: build system, solve, clamp update.
+
+        Returns True if the linear solve succeeded and node voltages were
+        updated, False on singular Jacobian.
+        """
+        internal_pos = {idx: i for i, idx in enumerate(sim.internal_indices)}
+        n = len(sim.internal_indices)
+        a = np.zeros((n, n), dtype=float)
+        b = np.zeros(n, dtype=float)
+        for i, idx in enumerate(sim.internal_indices):
+            b[i] = -residual_vec[idx]
+        for k, (row, col) in enumerate(sim.jacobian_info):
+            if row in internal_pos and col in internal_pos:
+                a[internal_pos[row], internal_pos[col]] = sim.jacobian_resist[k]
+        try:
+            delta = np.linalg.solve(a, b)
+        except np.linalg.LinAlgError:
+            return False
+        for i, idx in enumerate(sim.internal_indices):
+            update = max(-0.2, min(0.2, float(delta[i])))
+            sim.solve[idx] = sim.solve[idx] + update
+        return True
+
     def solve_internal_nodes(self, model: OsdiModel, sim: OsdiSimulation,
                              max_iter: int, tol: float) -> bool:
         if not sim.internal_indices:
             return True
-        internal_pos = {idx: i for i, idx in enumerate(sim.internal_indices)}
         for _ in range(max_iter):
             flags = (ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_RESIDUAL |
                      CALC_RESIST_JACOBIAN | CALC_RESIST_LIM_RHS |
@@ -551,27 +573,8 @@ class OsdiInstance:
             norm = max(abs(sim.residual_resist[idx]) for idx in sim.internal_indices)
             if norm < tol:
                 return True
-            n = len(sim.internal_indices)
-            a = np.zeros((n, n), dtype=float)
-            b = np.zeros(n, dtype=float)
-            for i, idx in enumerate(sim.internal_indices):
-                b[i] = -sim.residual_resist[idx]
-            for k, (row, col) in enumerate(sim.jacobian_info):
-                if row in internal_pos and col in internal_pos:
-                    r = internal_pos[row]
-                    c = internal_pos[col]
-                    a[r, c] = sim.jacobian_resist[k]
-            try:
-                delta = np.linalg.solve(a, b)
-            except np.linalg.LinAlgError:
+            if not self._nr_step(sim, list(sim.residual_resist)):
                 return False
-            for i, idx in enumerate(sim.internal_indices):
-                update = float(delta[i])
-                if update > 0.2:
-                    update = 0.2
-                elif update < -0.2:
-                    update = -0.2
-                sim.solve[idx] = sim.solve[idx] + update
         return False
 
     def solve_internal_nodes_tran(self, model: OsdiModel, sim: OsdiSimulation,
@@ -579,7 +582,6 @@ class OsdiInstance:
                                   max_iter: int, tol: float) -> bool:
         if not sim.internal_indices:
             return True
-        internal_pos = {idx: i for i, idx in enumerate(sim.internal_indices)}
         for _ in range(max_iter):
             flags = (ANALYSIS_TRAN | CALC_RESIST_RESIDUAL | CALC_RESIST_JACOBIAN |
                      CALC_RESIST_LIM_RHS | CALC_REACT_RESIDUAL |
@@ -597,27 +599,8 @@ class OsdiInstance:
             norm = max(abs(total_residual[idx]) for idx in sim.internal_indices)
             if norm < tol:
                 return True
-            n = len(sim.internal_indices)
-            a = np.zeros((n, n), dtype=float)
-            b = np.zeros(n, dtype=float)
-            for i, idx in enumerate(sim.internal_indices):
-                b[i] = -total_residual[idx]
-            for k, (row, col) in enumerate(sim.jacobian_info):
-                if row in internal_pos and col in internal_pos:
-                    r = internal_pos[row]
-                    c = internal_pos[col]
-                    a[r, c] = sim.jacobian_resist[k]
-            try:
-                delta = np.linalg.solve(a, b)
-            except np.linalg.LinAlgError:
+            if not self._nr_step(sim, total_residual):
                 return False
-            for i, idx in enumerate(sim.internal_indices):
-                update = float(delta[i])
-                if update > 0.2:
-                    update = 0.2
-                elif update < -0.2:
-                    update = -0.2
-                sim.solve[idx] = sim.solve[idx] + update
         return False
 
     def _collapse_nodes(self, connected_terminals: int) -> List[int]:
@@ -668,7 +651,7 @@ def apply_param(desc: OsdiDescriptor,
     for i in range(desc.num_params):
         param = desc.param_opvar[i]
         param_name = param.name[0].decode("utf-8", errors="replace") if param.name else ""
-        if not param_name or _to_lower(name) != _to_lower(param_name):
+        if not param_name or name.lower() != param_name.lower():
             continue
         ptr = None
         if (param.flags & PARA_KIND_MASK) == PARA_KIND_INST:

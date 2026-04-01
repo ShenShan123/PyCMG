@@ -9,6 +9,7 @@ modeling process variation vs. device characteristics for NN compact models.
 from __future__ import annotations
 
 import ctypes
+import math
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -211,8 +212,6 @@ def compute_sensitivity(
     vth_mag = find_threshold(baseline_inst, vdd, device_type)
     bias_points = _build_bias_points(vdd, vth_mag, device_type)
 
-    import math
-
     baseline_results: List[Dict[str, float]] = []
     for bp in bias_points:
         baseline_results.append(baseline_inst.eval_dc(bp))
@@ -223,7 +222,7 @@ def compute_sensitivity(
         1 for r in baseline_results if math.isnan(r.get("ids", 0.0))
     )
     if nan_count == len(baseline_results):
-        import warnings
+        import warnings  # rare path: only on broken model
         warnings.warn(
             f"Baseline eval_dc returns NaN for all bias points. "
             f"The model may be invalid at this geometry. "
