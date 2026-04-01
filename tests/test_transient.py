@@ -141,8 +141,8 @@ def _run_transient_comparison(tech_name: str, device_type: str) -> None:
             except Exception:
                 mismatches += 1
 
-    # Allow up to 10% of checked points to mismatch
-    max_mismatches = max(1, int(n_checked * 0.10))
+    # Allow up to 5% of checked points to mismatch
+    max_mismatches = max(1, int(n_checked * 0.05))
     assert mismatches <= max_mismatches, (
         f"{label}: {mismatches}/{n_checked} time points exceeded tolerance "
         f"(max allowed: {max_mismatches})"
@@ -161,7 +161,11 @@ def test_nmos_transient_waveform(tech_name: str):
 @pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
 @pytest.mark.parametrize("tech_name", TECH_NAMES)
 def test_pmos_transient_waveform(tech_name: str):
-    """Compare PMOS PyCMG transient currents against NGSPICE at solved node voltages."""
+    """Compare PMOS PyCMG transient currents against NGSPICE at solved node voltages.
+
+    ve=0.0 for PMOS: exercises deep reverse body bias (Vbs = -Vdd).
+    Standard zero body bias (ve=vdd) is tested in test_temperature.py and test_body_bias.py.
+    """
     try:
         _run_transient_comparison(tech_name, "pmos")
     except FileNotFoundError:

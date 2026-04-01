@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,10 +23,10 @@ from typing import Dict, List, Optional
 
 from pycmg.parser import (
     _ASSIGN_RE,
-    _extract_model_params,
     _find_length_variant,
     _scan_all_variants,
     parse_number_with_suffix,
+    parse_tsmc_pdk,
     scan_pdk_geometry_combos,
 )
 
@@ -427,18 +428,12 @@ def generate_naive_tsmc_modelcard(
     """
     base_name = f"{model_type}_{device_type}"  # e.g., "nch_svt_mac"
 
-    # Extract global model parameters (base)
-    expected_type = "nmos" if model_type == "nch" else "pmos"
-    global_params = _extract_model_params(pdk_path, f"{base_name}.global", expected_type)
+    # Delegate extraction + merge to parse_tsmc_pdk (single source of truth)
+    parsed = parse_tsmc_pdk(pdk_path, model_type, device_type, L, NFIN)
+    merged_params = parsed.params
 
-    # Find which variant matches the L (and NFIN) value
+    # Determine which variant was selected (needed for header comment only)
     variant_num = _find_length_variant(pdk_path, base_name, L, NFIN)
-
-    # Extract variant model parameters
-    variant_params = _extract_model_params(pdk_path, f"{base_name}.{variant_num}", expected_type)
-
-    # Merge: variant overrides global
-    merged_params = {**global_params, **variant_params}
 
     # Write naive modelcard (PROCESS PARAMETERS ONLY)
     output_file = Path(output_path)
@@ -472,10 +467,14 @@ def generate_naive_tsmc_modelcard(
             # Skip sentinel values (TSMC PDKs use -999*10^n as "use default" markers)
             try:
                 fval = float(val)
-                if abs(fval) > 1e9 and str(val).lstrip('-').startswith('999'):
-                    skipped_sentinels.append(f"{key}={val}")
-                    continue
-            except (ValueError, TypeError):
+                if abs(fval) > 1e6:
+                    # Check if value is a TSMC sentinel: ±999 * 10^n
+                    exp = int(math.log10(abs(fval)))
+                    mantissa = abs(fval) / (10.0 ** (exp - 2))  # normalize to 3-digit mantissa
+                    if abs(mantissa - 999.0) < 0.5:
+                        skipped_sentinels.append(f"{key}={val}")
+                        continue
+            except (ValueError, TypeError, OverflowError):
                 pass
 
             # Format parameter line

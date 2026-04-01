@@ -84,6 +84,15 @@ def _compare_dc(
     assert_close(f"{prefix}/ig", py["ig"], ng["ig"])
     assert_close(f"{prefix}/is", py["is"], ng["is"])
 
+    # Subthreshold: verify PyCMG and NGSPICE agree on leakage magnitude
+    if region == "subthreshold":
+        _leakage_floor = 1e-12  # below this, both are "essentially zero"
+        if abs(ng["id"]) > _leakage_floor and abs(py["id"]) > _leakage_floor:
+            ratio = abs(py["id"] / ng["id"])
+            assert 0.1 < ratio < 10.0, (
+                f"{prefix}: PyCMG/NGSPICE subthreshold id ratio {ratio:.2f} outside [0.1, 10.0]"
+            )
+
     # Derivatives
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])

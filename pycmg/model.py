@@ -14,7 +14,7 @@ import numpy as np
 
 from .osdi_types import (
     ACCESS_FLAG_INSTANCE,
-    ACCESS_FLAG_READ,
+    ACCESS_FLAG_SET,
     ANALYSIS_DC,
     ANALYSIS_IC,
     ANALYSIS_STATIC,
@@ -27,6 +27,7 @@ from .osdi_types import (
     CALC_RESIST_LIM_RHS,
     CALC_RESIST_RESIDUAL,
     ENABLE_LIM,
+    EVAL_RET_FLAG_FATAL,
     INIT_LIM,
     PARA_KIND_MASK,
     PARA_KIND_OPVAR,
@@ -42,7 +43,7 @@ from .core import (
     OsdiSimulation,
     apply_param,
 )
-from .parser import ParsedModel, parse_modelcard, parse_number_with_suffix, parse_tsmc_pdk
+from .parser import ParsedModel, parse_modelcard, parse_number_with_suffix
 
 
 class Model:
@@ -117,6 +118,13 @@ class Instance:
         model: Model object containing OSDI descriptor and modelcard
         params: Instance-specific parameters (L, TFIN, NFIN, etc.)
         temperature: Operating temperature in KELVIN (default: 300.15 K = 27C)
+        model_overrides: Optional model-level parameter overrides for process variation.
+
+            WARNING: model_overrides writes directly to the shared OsdiModel buffer.
+            Creating multiple Instances from the same Model with different
+            model_overrides will cause earlier Instances to silently use the
+            latest override values. For per-instance process variation, create
+            a separate Model() per override set.
 
     Example:
         >>> # Create instance at room temperature (27C)
@@ -161,12 +169,25 @@ class Instance:
                 apply_param(model.descriptor, self._inst, model.model, key, val, False)
         self._model.model.process_params()
         self._inst.bind_simulation(self._sim, model.model, self._connected_terminals, temperature)
+        self._cache_terminal_positions()
         self._has_prev_solve = False
         self._has_prev_q = False
         self._prev_qg = 0.0
         self._prev_qd = 0.0
         self._prev_qs = 0.0
         self._prev_qb = 0.0
+
+    def _cache_terminal_positions(self) -> None:
+        """Cache g/d/s positions in terminal_indices to avoid per-call linear scans."""
+        def _find(name: str) -> int:
+            for i, idx in enumerate(self._sim.terminal_indices):
+                if self._sim.node_names[idx] == name:
+                    return i
+            return -1
+
+        self._term_g: int = _find("g")
+        self._term_d: int = _find("d")
+        self._term_s: int = _find("s")
 
     def set_params(self, params: Dict[str, float], allow_rebind: bool = False) -> None:
         for key, val in params.items():
@@ -178,6 +199,13 @@ class Instance:
                 raise RuntimeError("topology changed; rebind required")
             self._sim = OsdiSimulation()
             self._inst.bind_simulation(self._sim, self._model.model, self._connected_terminals, self._temperature)
+            self._cache_terminal_positions()
+            self._has_prev_solve = False
+            self._has_prev_q = False
+            self._prev_qg = 0.0
+            self._prev_qd = 0.0
+            self._prev_qs = 0.0
+            self._prev_qb = 0.0
 
     def internal_node_count(self) -> int:
         return len(self._sim.internal_indices)
@@ -244,10 +272,8 @@ class Instance:
                         break
             if not matched:
                 continue
-            ptr = desc.access(self._inst.data(), self._model.model.data(), i, ACCESS_FLAG_INSTANCE)
-            if not ptr:
-                ptr = desc.access(self._inst.data(), self._model.model.data(), i,
-                                  ACCESS_FLAG_READ | ACCESS_FLAG_INSTANCE)
+            ptr = desc.access(self._inst.data(), self._model.model.data(), i,
+                              ACCESS_FLAG_SET | ACCESS_FLAG_INSTANCE)
             if not ptr:
                 return None
             ty = param.flags & PARA_TY_MASK
@@ -322,17 +348,10 @@ class Instance:
         c_condensed = self._condense_capacitance(g_full, c_full,
                                                  self._sim.terminal_indices,
                                                  self._sim.internal_indices)
-        def idx_of(name: str) -> int:
-            for i, idx in enumerate(self._sim.terminal_indices):
-                if self._sim.node_names[idx] == name:
-                    return i
-            return -1
         caps = {"cgg": 0.0, "cgd": 0.0, "cgs": 0.0, "cdg": 0.0, "cdd": 0.0}
         if c_condensed.size == 0:
             return caps
-        g = idx_of("g")
-        d = idx_of("d")
-        s = idx_of("s")
+        g, d, s = self._term_g, self._term_d, self._term_s
         if g >= 0:
             # Diagonal: direct value (self-capacitance, positive)
             caps["cgg"] = float(c_condensed[g, g])
@@ -448,7 +467,9 @@ class Instance:
                  CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
                  CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
                  CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM)
-        self._inst.eval(self._model.model, self._sim, flags)
+        ret = self._inst.eval(self._model.model, self._sim, flags)
+        if ret & EVAL_RET_FLAG_FATAL:
+            raise RuntimeError(f"OSDI eval fatal error: flags=0x{ret:08x}")
         self._sim.clear()
         self._inst.load_residuals(self._model.model, self._sim)
         self._inst.load_jacobian(self._model.model, self._sim)
@@ -529,7 +550,9 @@ class Instance:
             ic_flags = (ANALYSIS_IC | CALC_RESIST_RESIDUAL |
                         CALC_RESIST_LIM_RHS | CALC_REACT_RESIDUAL |
                         CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM)
-            self._inst.eval_with_time(self._model.model, self._sim, ic_flags, time)
+            ret = self._inst.eval_with_time(self._model.model, self._sim, ic_flags, time)
+            if ret & EVAL_RET_FLAG_FATAL:
+                raise RuntimeError(f"OSDI eval fatal error: flags=0x{ret:08x}")
             if len(self._sim.state_prev) == len(self._sim.state_next):
                 self._sim.state_prev, self._sim.state_next = self._sim.state_next, self._sim.state_prev
         num_states = self.state_count()
@@ -547,7 +570,9 @@ class Instance:
                      CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
                      CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
                      CALC_REACT_LIM_RHS | CALC_OP | ENABLE_LIM | INIT_LIM)
-            self._inst.eval(self._model.model, self._sim, flags)
+            ret = self._inst.eval(self._model.model, self._sim, flags)
+            if ret & EVAL_RET_FLAG_FATAL:
+                raise RuntimeError(f"OSDI eval fatal error: flags=0x{ret:08x}")
             self._sim.clear()
             self._inst.load_residuals(self._model.model, self._sim)
         else:
@@ -556,7 +581,9 @@ class Instance:
                      CALC_RESIST_LIM_RHS | CALC_REACT_JACOBIAN |
                      CALC_REACT_RESIDUAL | CALC_REACT_LIM_RHS |
                      CALC_OP | ENABLE_LIM | INIT_LIM)
-            self._inst.eval_with_time(self._model.model, self._sim, flags, time)
+            ret = self._inst.eval_with_time(self._model.model, self._sim, flags, time)
+            if ret & EVAL_RET_FLAG_FATAL:
+                raise RuntimeError(f"OSDI eval fatal error: flags=0x{ret:08x}")
             self._sim.clear()
             self._inst.load_residuals(self._model.model, self._sim)
             self._inst.load_jacobian_tran(self._model.model, self._sim, alpha)

@@ -274,6 +274,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 
 ### TSMC PDK Variant Selection
 - TSMC PDK variants are indexed by **both** L range (lmin/lmax) **and** NFIN range (nfinmin/nfinmax). Any function that selects a variant must match on both dimensions. `_scan_all_variants()` is the single source of truth for parsing variant metadata.
+- **Model name matching must be exact-word, never substring.** `.model nch_svt_mac.1` must not match `.model nch_svt_mac.10`. Always split the line and compare `parts[1] == model_name`, never use `model_name in line`.
 
 ### Capacitance Sign Convention
 - The OSDI reactive Jacobian (dQ/dV) uses **Y-matrix convention** where off-diagonal entries are negative. SPICE capacitance variables (cgd, cgs, cdg) use the **opposite** sign. Off-diagonal entries must be negated when extracting from the condensed matrix; diagonal entries (cgg, cdd) need no sign flip.
@@ -281,10 +282,11 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 ### NGSPICE OSDI Limitations
 - **No instance-line parameters**: NGSPICE OSDI cannot accept instance parameters on the device line (e.g., `N1 d g s e model L=16e-9` fails silently). All geometric parameters must be **baked into the `.model` block**.
 - **Multi-model files**: When a modelcard contains multiple `.model` blocks, `Model()` must pass `model_name` to `parse_modelcard(target=...)` so the correct block is parsed.
-- **TSMC PDK sentinel values**: TSMC PDKs use `-999*10^n` as "use default" markers. These are filtered during naive modelcard generation (abs > 1e9 and string starts with "999").
+- **TSMC PDK sentinel values**: TSMC PDKs use `-999*10^n` as "use default" markers. These are filtered during naive modelcard generation using arithmetic mantissa detection (not string matching, since `str(float)` switches to scientific notation for large values).
 
 ### OSDI Parameter Access Flags
 - Use `ACCESS_FLAG_SET` (1), **not** `ACCESS_FLAG_READ` (0), for reading model parameter values from the OSDI buffer. `ACCESS_FLAG_READ` returns null for parameters not explicitly written. Ensure `enumerate_model_params()` is called AFTER creating a baseline `Instance`.
+- For instance-level opvar reads, use `ACCESS_FLAG_SET | ACCESS_FLAG_INSTANCE` (= 5). Note that `ACCESS_FLAG_READ | ACCESS_FLAG_INSTANCE` equals `ACCESS_FLAG_INSTANCE` (= 4) since `ACCESS_FLAG_READ = 0` — a bitwise OR with zero is a no-op.
 
 ### Extended Voltage Range Design
 - Extended voltage sweep uses `voltage_scale` multiplier (default 1.0) relative to VDD.
@@ -295,6 +297,21 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - OSDI init out-of-bounds errors should be treated as warnings (matching NGSPICE behavior), not fatal.
 - Some OSDI params are integer-typed; read/write using `PARA_TY_INT` to avoid garbage values.
 - Do not pass `prev_solve` to OSDI unless it is explicitly initialized; uninitialized `prev_solve` breaks DC/AC comparisons.
+- **Always check `EVAL_RET_FLAG_FATAL` (bit 1) on the return value of `eval()` / `eval_with_time()`.** If set, residual and Jacobian buffers contain undefined values — raise an error rather than reading garbage.
+- **Always null-guard `info.errors` before iterating** in `_check_init_result`. A malformed OSDI binary may set `num_errors > 0` with a null pointer.
+
+### ctypes Buffer Safety
+- **Jacobian arrays must never be reallocated after `bind_simulation`.** `bind_simulation` stores raw C pointers into the OSDI instance buffer; reallocating the backing arrays creates dangling pointers. `build_jacobian()` must reuse/zero existing arrays in-place when the size hasn't changed.
+- **Keep-alive references for ctypes arrays must be stored as object attributes** (e.g., `sim._keep_alive`), not bare local variables like `_ = (...)`. The `_` convention is CPython-specific and may be optimized away by other implementations.
+- **After `set_params` triggers a rebind**, all transient state (`_has_prev_solve`, `_has_prev_q`, `_prev_q*`) must be reset. Stale charge history from a previous geometry produces incorrect `dQ/dt`.
+
+### Instance / Model Isolation
+- **`model_overrides` writes to a shared `OsdiModel` buffer.** Creating multiple Instances from the same Model with different `model_overrides` will silently corrupt earlier Instances. For per-instance process variation, create a separate `Model()` per override set.
+- **Device polarity must come from `DeviceConfig.inst_params["DEVTYPE"]`**, not from substring matching on device names. `DEVTYPE=1` is NMOS, `DEVTYPE=0` is PMOS.
+- **Cache terminal index lookups** (`_term_g`, `_term_d`, `_term_s`) after `bind_simulation`. Do not re-scan `terminal_indices` on every `eval_dc` call.
+
+### Newton-Raphson Limiting (`_pnjlim`)
+- Always guard `math.log(vnew / vt)` against `vnew <= 0`. Fall back to `vcrit` when the argument would be non-positive.
 
 ## Gap Checklist (Inventory vs Workflow)
 - OSDI build pipeline: CMake builds `.osdi` via OpenVAF.
@@ -314,7 +331,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
 - Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - C++ OSDI host: removed (was `cpp/osdi_host.cpp`); Python uses ctypes directly via `pycmg/core.py`.
-- Naive modelcard generation: `scripts/generate_naive_tsmc.py` generates all Vt flavors from raw PDKs.
+- Naive modelcard generation: `scripts/generate_naive_tsmc.py` generates all Vt flavors from raw PDKs. `generate_naive_tsmc_modelcard` delegates to `parse_tsmc_pdk` for the merge step — do not duplicate the global+variant merge logic.
 - Extended voltage range: `SweepConfig.voltage_scale` (default 1.0, use 2.0 for 2*VDD) for NN simulator convergence training.
 - PDK geometry sweep: `SweepConfig.sweep_geometry` (default True) enumerates PDK-defined (L, NFIN) combinations from variant bin boundaries.
 - PDK introspection: `scan_pdk_geometry_combos()` returns all (lmin, nfin) sweep points; `_scan_all_variants()` returns parsed variant metadata.

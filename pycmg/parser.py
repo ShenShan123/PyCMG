@@ -408,9 +408,10 @@ def _extract_model_params(path: str, model_name: str, expected_type: str) -> Dic
 
         # Look for the target model
         if trimmed.lower().startswith(".model"):
-            # Check if this matches our target
-            # Need to be careful with case sensitivity
-            if model_name in trimmed and expected_type in trimmed.lower():
+            # Check if this matches our target using exact word match to avoid
+            # substring false positives (e.g., ".1" matching ".10", ".14", etc.)
+            parts = trimmed.split()
+            if len(parts) >= 3 and parts[1] == model_name and expected_type in trimmed.lower():
                 # Found it - parse the block
                 block_lines = [trimmed]
                 idx += 1

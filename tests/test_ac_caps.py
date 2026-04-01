@@ -41,6 +41,8 @@ def test_pmos_ac_caps(tech_name: str) -> None:
     vdd = tech["vdd"]
 
     # PMOS saturation: Vs=Vdd, Vd and Vg pulled low
+    # ve=0.0 for PMOS: exercises deep reverse body bias (Vbs = -Vdd).
+    # Standard zero body bias (ve=vdd) is tested in test_temperature.py and test_body_bias.py.
     vd = vdd * 0.3
     vg = vdd * 0.3
     vs = vdd

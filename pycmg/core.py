@@ -126,7 +126,10 @@ def _pnjlim(init: bool,
             else:
                 vnew = vcrit
         else:
-            vnew = vt * math.log(vnew / vt)
+            if vnew > 0:
+                vnew = vt * math.log(vnew / vt)
+            else:
+                vnew = vcrit
         triggered = True
     if check:
         check[0] = triggered
@@ -163,6 +166,9 @@ def _check_init_result(desc: Optional[OsdiDescriptor], info: OsdiInitInfo) -> No
         return
     message = []
     fatal = False
+    if not info.errors:
+        sys.stderr.write(f"OSDI init: {info.num_errors} errors reported but error array is null\n")
+        return
     for i in range(info.num_errors):
         err = info.errors[i]
         if err.code == INIT_ERR_OUT_OF_BOUNDS:
@@ -372,8 +378,16 @@ class OsdiSimulation:
 
     def build_jacobian(self) -> None:
         size = len(self.jacobian_info)
-        self.jacobian_resist = self._make_array(size)
-        self.jacobian_react = self._make_array(size)
+        if not hasattr(self, 'jacobian_resist') or len(self.jacobian_resist) != size:
+            self.jacobian_resist = self._make_array(size)
+        else:
+            ctypes.memset(ctypes.addressof(self.jacobian_resist), 0,
+                          ctypes.sizeof(self.jacobian_resist))
+        if not hasattr(self, 'jacobian_react') or len(self.jacobian_react) != size:
+            self.jacobian_react = self._make_array(size)
+        else:
+            ctypes.memset(ctypes.addressof(self.jacobian_react), 0,
+                          ctypes.sizeof(self.jacobian_react))
 
     def clear(self) -> None:
         for i in range(len(self.residual_resist)):
@@ -511,8 +525,8 @@ class OsdiInstance:
         sim_info.prev_state = sim.state_prev
         sim_info.next_state = sim.state_next
         sim_info.flags = flags
-        # Keep arrays alive while eval runs.
-        _ = (names_arr, vals_arr, names_str_arr, vals_str_arr)
+        # Keep arrays alive while eval runs (store on sim to survive across GC cycles).
+        sim._keep_alive = (names_arr, vals_arr, names_str_arr, vals_str_arr)
         return self._desc.eval(_INSTANCE_NAME, self._buf.ptr, model.data(), ctypes.byref(sim_info))
 
     def load_residuals(self, model: OsdiModel, sim: OsdiSimulation) -> None:

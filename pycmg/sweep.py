@@ -368,7 +368,7 @@ def sweep_dc(osdi_path: str, config: SweepConfig, verbose: int = 2) -> SweepResu
 
         for device_name in device_list:
             device = tech.get_device(device_name)
-            device_type = "nmos" if "nmos" in device_name else "pmos"
+            device_type = "nmos" if device.inst_params.get("DEVTYPE", 1.0) != 0 else "pmos"
 
             # Get PDK-defined (L, NFIN) geometry combinations
             if config.sweep_geometry:

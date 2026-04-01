@@ -24,9 +24,7 @@ from typing import Any, Dict, Tuple
 import pytest
 
 from pycmg.tech import TECH_REGISTRY, TechConfig
-
-ROOT = Path(__file__).resolve().parents[1]
-OSDI_PATH = ROOT / "build" / "osdi" / "bsimcmg.osdi"
+from tests.helpers import ROOT, OSDI_PATH
 
 # ---------------------------------------------------------------------------
 # Test-specific constants: L and NFIN values used by existing tests.

@@ -38,6 +38,8 @@ def get_pmos_jacobian_op_points(vdd: float) -> list[dict]:
     """Generate PMOS operating points for Jacobian testing.
 
     PMOS: Vs=Vdd, Vg/Vd referenced to Vdd (mirroring test_dc_regions.py).
+    ve=0.0 for PMOS: exercises deep reverse body bias (Vbs = -Vdd).
+    Standard zero body bias (ve=vdd) is tested in test_temperature.py and test_body_bias.py.
     """
     return [
         {"name": "saturation", "d": 0.0, "g": 0.2 * vdd, "s": vdd, "e": 0.0},

@@ -31,6 +31,8 @@ def get_nmos_region_ops(vdd: float) -> dict:
 
 def get_pmos_region_ops(vdd: float) -> dict:
     """PMOS operating regions: off, linear, saturation."""
+    # ve=0.0 for PMOS: exercises deep reverse body bias (Vbs = -Vdd).
+    # Standard zero body bias (ve=vdd) is tested in test_temperature.py and test_body_bias.py.
     return {
         "off_state":           {"d": 0.0,       "g": vdd,       "s": vdd, "e": 0.0},
         "strong_linear":       {"d": 0.7 * vdd, "g": 0.0,       "s": vdd, "e": 0.0},
@@ -70,6 +72,24 @@ def test_nmos_dc_region(tech_name: str, region: str):
     assert_close(f"{prefix}/id", py["id"], ng["id"])
     assert_close(f"{prefix}/ig", py["ig"], ng["ig"])
     assert_close(f"{prefix}/is", py["is"], ng["is"])
+
+    # Off-state: verify PyCMG and NGSPICE agree on leakage magnitude
+    if region == "off_state":
+        _leakage_floor = 1e-12  # below this, both are "essentially zero"
+        if abs(ng["id"]) > _leakage_floor and abs(py["id"]) > _leakage_floor:
+            ratio = abs(py["id"] / ng["id"])
+            assert 0.1 < ratio < 10.0, (
+                f"{prefix}: PyCMG/NGSPICE off-state id ratio {ratio:.2f} outside [0.1, 10.0]"
+            )
+    else:
+        # Non-off-state: verify ids = id - is internal consistency
+        ids_from_components = py["id"] - py["is"]
+        assert abs(py["ids"] - ids_from_components) < 1e-15, (
+            f"{prefix}: ids ({py['ids']:.3e}) != id - is ({ids_from_components:.3e})"
+        )
+        # Compare ids against NGSPICE-derived id - is
+        ng_ids = ng["id"] - ng["is"]
+        assert_close(f"{prefix}/ids", py["ids"], ng_ids)
 
     # Compare derivatives
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
@@ -114,6 +134,25 @@ def test_pmos_dc_region(tech_name: str, region: str):
     assert_close(f"{prefix}/id", py["id"], ng["id"])
     assert_close(f"{prefix}/ig", py["ig"], ng["ig"])
     assert_close(f"{prefix}/is", py["is"], ng["is"])
+
+    # Off-state: verify PyCMG and NGSPICE agree on leakage magnitude
+    if region == "off_state":
+        _leakage_floor = 1e-12  # below this, both are "essentially zero"
+        if abs(ng["id"]) > _leakage_floor and abs(py["id"]) > _leakage_floor:
+            ratio = abs(py["id"] / ng["id"])
+            assert 0.1 < ratio < 10.0, (
+                f"{prefix}: PyCMG/NGSPICE off-state id ratio {ratio:.2f} outside [0.1, 10.0]"
+            )
+    else:
+        # Non-off-state: verify ids = id - is internal consistency
+        ids_from_components = py["id"] - py["is"]
+        assert abs(py["ids"] - ids_from_components) < 1e-15, (
+            f"{prefix}: ids ({py['ids']:.3e}) != id - is ({ids_from_components:.3e})"
+        )
+        # Compare ids against NGSPICE-derived id - is
+        ng_ids = ng["id"] - ng["is"]
+        assert_close(f"{prefix}/ids", py["ids"], ng_ids)
+
     assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
     assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
     assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
