@@ -422,11 +422,13 @@ In sweep mode, use `--ve-values 0.0 0.1 0.2 0.3` on the CLI.
 ### NFIN Scaling
 
 ```python
-for nfin in [1, 2, 3, 4]:
+for nfin in [2, 3, 5, 10]:
     inst = Instance(model, params={"L": 7e-9, "TFIN": 6.5e-9, "NFIN": float(nfin)})
     result = inst.eval_dc({"d": 0.7, "g": 0.5, "s": 0.0, "e": 0.0})
     print(f"NFIN={nfin}: Ids={result['ids']:.3e} A")
 ```
+
+> **Note:** NFIN=1 causes convergence failures for certain TSMC process variants (e.g., tsmc5:ulvt, tsmc16:lnvt) where BSIM-CMG parameters go negative. Use NFIN >= 2 for reliable results. See [Known Limitations](#known-limitations).
 
 ### Custom Voltage Grids
 
@@ -613,8 +615,8 @@ pycmg-wrapper/
 
 **`Instance(model, params, temperature, model_overrides)`** -- Device instance with geometry. `params` sets instance parameters (L, TFIN, NFIN). `temperature` in Kelvin (default: 300.15). `model_overrides` overrides modelcard parameters (for process variation).
 
-- `eval_dc(nodes) -> dict` -- DC operating point. Returns 17 outputs.
-- `eval_tran(nodes, time, delta_t) -> dict` -- Transient evaluation. Returns 9 outputs.
+- `eval_dc(nodes) -> dict` -- DC operating point. Returns 17 outputs. Raises `RuntimeError` if internal node NR fails to converge (e.g., NFIN=1 with certain TSMC variants).
+- `eval_tran(nodes, time, delta_t) -> dict` -- Transient evaluation. Returns 9 outputs. Warns (instead of raising) on internal node convergence failure; the circuit-level NR provides outer convergence.
 - `get_jacobian_matrix(nodes) -> np.ndarray` -- 4x4 condensed Jacobian (dI/dV).
 - `set_params(params, allow_rebind)` -- Update instance parameters.
 
@@ -649,6 +651,18 @@ pycmg-wrapper/
 **`parse_number_with_suffix(s)`** -- Parses SPICE numbers with engineering suffixes (e.g., `"16n"` -> `16e-9`, `"1.5meg"` -> `1.5e6`).
 
 **`scan_pdk_geometry_combos(path, base_name)`** -- Enumerates PDK-defined (L, NFIN) sweep points for a TSMC device. For each variant, returns `(lmin, nfinmin)` and `(lmin, nfinmax)`. Sorted and deduplicated.
+
+## Known Limitations
+
+### NFIN=1 Convergence Failures
+
+BSIM-CMG computes NFIN-dependent instance parameters (ETA0_i, U0_i, UA_i) that can become negative at NFIN=1 for certain process variants. The OSDI binary warns but does not abort. The internal node Newton-Raphson then diverges monotonically (0.2 V/step × 200 iterations → ~40 V internal drain), producing `id ≈ 40 kA` and `NaN` for all derivatives.
+
+**Affected variants** (known): `tsmc5:ulvt`, `tsmc16:lnvt` at NFIN=1. Other techs (ASAP7, TSMC7, TSMC12) and NFIN ≥ 2 are unaffected.
+
+**Behavior**: `eval_dc` raises `RuntimeError` when internal NR fails to converge. Callers that sweep bias points should catch this exception. `eval_tran` warns instead of raising.
+
+**Recommendation**: Use NFIN ≥ 2 for data generation and sweeps. NFIN=1 single-fin devices are an edge case rarely used in real designs.
 
 ## License
 

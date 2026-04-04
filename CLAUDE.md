@@ -299,6 +299,8 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - Do not pass `prev_solve` to OSDI unless it is explicitly initialized; uninitialized `prev_solve` breaks DC/AC comparisons.
 - **Always check `EVAL_RET_FLAG_FATAL` (bit 1) on the return value of `eval()` / `eval_with_time()`.** If set, residual and Jacobian buffers contain undefined values — raise an error rather than reading garbage.
 - **Always null-guard `info.errors` before iterating** in `_check_init_result`. A malformed OSDI binary may set `num_errors > 0` with a null pointer.
+- **Always check `solve_internal_nodes` return value.** `eval_dc` raises `RuntimeError` on convergence failure — callers that sweep bias points (data generation) must catch this to avoid garbage data (id=40 kA, NaN derivatives). `eval_tran` uses a relaxed tolerance (1e-3 vs 1e-9) and warns instead of raising, because the circuit-level NR provides outer convergence.
+- **NFIN=1 causes convergence failure** for certain TSMC process variants (e.g., tsmc5:ulvt, tsmc16:lnvt) where BSIM-CMG instance parameters (ETA0_i, U0_i, UA_i) become negative. When `solve_internal_nodes` diverges, the internal drain node drifts to ~40 V (200 iterations × 0.2 V clamp), producing `id ≈ 40 kA` and NaN for all derivatives. Avoid NFIN=1 in data generation; use NFIN ≥ 2.
 
 ### ctypes Buffer Safety
 - **Jacobian arrays must never be reallocated after `bind_simulation`.** `bind_simulation` stores raw C pointers into the OSDI instance buffer; reallocating the backing arrays creates dangling pointers. `build_jacobian()` must reuse/zero existing arrays in-place when the size hasn't changed.

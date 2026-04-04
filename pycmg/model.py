@@ -462,7 +462,12 @@ class Instance:
             >>> print(f"Transconductance: {result['gm']:.6e} S")
         """
         self._set_node_voltages(nodes, True)
-        self._inst.solve_internal_nodes(self._model.model, self._sim, 200, 1e-9)
+        converged = self._inst.solve_internal_nodes(self._model.model, self._sim, 200, 1e-9)
+        if not converged:
+            raise RuntimeError(
+                "Internal node NR failed to converge at "
+                + ", ".join(f"{k}={nodes.get(k, 0.0):.4f}" for k in ("d", "g", "s", "e"))
+            )
         flags = (ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
                  CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
                  CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
@@ -565,7 +570,17 @@ class Instance:
             ]:
                 self._sim.set_sim_param(key, val)
         if num_states == 0:
-            self._inst.solve_internal_nodes(self._model.model, self._sim, 200, 1e-9)
+            # Relaxed tolerance vs eval_dc's 1e-9: after the first-call IC
+            # eval the internal-node residual saturates at ~|Id| because the
+            # internal-only Jacobian cannot null the external coupling term.
+            # The circuit-level NR provides the outer convergence loop.
+            converged = self._inst.solve_internal_nodes(self._model.model, self._sim, 200, 1e-3)
+            if not converged:
+                warnings.warn(
+                    "Internal node NR did not converge (tran) at "
+                    + ", ".join(f"{k}={nodes.get(k, 0.0):.4f}" for k in ("d", "g", "s", "e")),
+                    stacklevel=2,
+                )
             flags = (ANALYSIS_DC | ANALYSIS_STATIC | CALC_RESIST_JACOBIAN |
                      CALC_RESIST_RESIDUAL | CALC_RESIST_LIM_RHS |
                      CALC_REACT_JACOBIAN | CALC_REACT_RESIDUAL |
@@ -576,7 +591,13 @@ class Instance:
             self._sim.clear()
             self._inst.load_residuals(self._model.model, self._sim)
         else:
-            self._inst.solve_internal_nodes_tran(self._model.model, self._sim, time, alpha, 200, 1e-9)
+            converged = self._inst.solve_internal_nodes_tran(self._model.model, self._sim, time, alpha, 200, 1e-9)
+            if not converged:
+                warnings.warn(
+                    "Internal node NR did not converge (tran) at "
+                    + ", ".join(f"{k}={nodes.get(k, 0.0):.4f}" for k in ("d", "g", "s", "e")),
+                    stacklevel=2,
+                )
             flags = (ANALYSIS_TRAN | CALC_RESIST_JACOBIAN | CALC_RESIST_RESIDUAL |
                      CALC_RESIST_LIM_RHS | CALC_REACT_JACOBIAN |
                      CALC_REACT_RESIDUAL | CALC_REACT_LIM_RHS |
