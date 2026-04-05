@@ -222,3 +222,47 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
     setattr(item, "rep_" + report.when, report)
+
+
+# ---------------------------------------------------------------------------
+# Shared test utilities
+# ---------------------------------------------------------------------------
+
+# Shared skip marker — replaces per-file @pytest.mark.skipif(not OSDI_PATH.exists(), ...)
+requires_osdi = pytest.mark.skipif(
+    not OSDI_PATH.exists(), reason="missing OSDI build artifact"
+)
+
+
+def standard_bias_points(
+    vdd: float, device_type: str, regions: str = "all",
+) -> dict[str, dict[str, float]]:
+    """Canonical bias points for DC verification tests.
+
+    Args:
+        vdd: Supply voltage
+        device_type: "nmos" or "pmos"
+        regions: "all" for 3 regions, or a specific region name
+
+    Returns:
+        Dict mapping region name -> terminal voltage dict {d, g, s, e}
+    """
+    if device_type == "nmos":
+        points = {
+            "off":        {"d": vdd,       "g": 0.0,       "s": 0.0, "e": 0.0},
+            "linear":     {"d": 0.3 * vdd, "g": vdd,       "s": 0.0, "e": 0.0},
+            "saturation": {"d": vdd,       "g": 0.8 * vdd, "s": 0.0, "e": 0.0},
+        }
+    else:
+        # ve=0 exercises deep reverse body bias (Vbs = -Vdd)
+        points = {
+            "off":        {"d": 0.0,       "g": vdd,       "s": vdd, "e": 0.0},
+            "linear":     {"d": 0.7 * vdd, "g": 0.0,       "s": vdd, "e": 0.0},
+            "saturation": {"d": 0.0,       "g": 0.2 * vdd, "s": vdd, "e": 0.0},
+        }
+    if regions == "all":
+        return points
+    return {regions: points[regions]}
+
+
+REGION_NAMES = ["off", "linear", "saturation"]

@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pytest
 
+from pycmg import Model, Instance
+
 ROOT = Path(__file__).resolve().parents[1]
 OSDI_PATH = ROOT / "build" / "osdi" / "bsimcmg.osdi"
 BUILD = ROOT / "build"
@@ -470,3 +472,88 @@ def parse_ngspice_raw(raw_path: Path) -> Dict[str, np.ndarray]:
         result[h] = data[:, i]
 
     return result
+
+
+def run_dc_comparison(
+    tech_name: str,
+    device_type: str,
+    bias: Dict[str, float],
+    tag: str,
+    *,
+    outputs: Optional[List[str]] = None,
+    temp_c: float = 27.0,
+    temp_k: Optional[float] = None,
+    check_off_state: bool = False,
+    check_ids: bool = False,
+    rel_tol: float = REL_TOL,
+    abs_tol_override: Optional[Dict[str, float]] = None,
+) -> None:
+    """Run PyCMG eval_dc vs NGSPICE OP comparison for a single bias point.
+
+    Replaces the repeated pattern: get_tech_modelcard -> run_ngspice_op ->
+    Model -> Instance -> eval_dc -> assert_close for each output.
+
+    Args:
+        tech_name: Key from conftest ALL_TECHNOLOGIES
+        device_type: "nmos" or "pmos"
+        bias: Terminal voltages {"d": ..., "g": ..., "s": ..., "e": ...}
+        tag: Unique tag for NGSPICE output directory
+        outputs: List of output keys to compare (default: id, gm, gds, gmb, qg, qd, qs, qb)
+        temp_c: Temperature in Celsius (for NGSPICE)
+        temp_k: Temperature in Kelvin (for PyCMG). If None, derived from temp_c.
+        check_off_state: If True, use relaxed leakage-ratio comparison for id
+        check_ids: If True, also verify ids = id - is consistency
+        rel_tol: Relative tolerance override
+        abs_tol_override: Per-output absolute tolerance overrides {key: tol}
+    """
+    # Avoid circular import: conftest imports from helpers, so import lazily
+    from tests.conftest import ALL_TECHNOLOGIES, get_tech_modelcard
+
+    tech = ALL_TECHNOLOGIES[tech_name]
+    modelcard, model_name, inst_params = get_tech_modelcard(tech_name, device_type)
+    vdd = tech["vdd"]
+
+    if temp_k is None:
+        temp_k = temp_c + 273.15
+
+    if outputs is None:
+        outputs = ["id", "gm", "gds", "gmb", "qg", "qd", "qs", "qb"]
+
+    # NGSPICE reference
+    ng = run_ngspice_op(
+        modelcard, model_name, inst_params,
+        bias["d"], bias["g"], bias["s"], bias["e"],
+        temp_c=temp_c, tag=tag,
+    )
+
+    # PyCMG
+    model = Model(str(OSDI_PATH), str(modelcard), model_name)
+    kwargs: Dict[str, Any] = {"params": inst_params}
+    if abs(temp_k - 300.15) > 0.01:
+        kwargs["temperature"] = temp_k
+    inst = Instance(model, **kwargs)
+    py = inst.eval_dc(bias)
+
+    prefix = f"{tech_name}/{device_type}/{tag}"
+
+    for key in outputs:
+        kw: Dict[str, Any] = {"rel_tol": rel_tol}
+        if abs_tol_override and key in abs_tol_override:
+            kw["abs_tol"] = abs_tol_override[key]
+        assert_close(f"{prefix}/{key}", py[key], ng[key], **kw)
+
+    if check_off_state:
+        _leakage_floor = 1e-12
+        if abs(ng["id"]) > _leakage_floor and abs(py["id"]) > _leakage_floor:
+            ratio = abs(py["id"] / ng["id"])
+            assert 0.1 < ratio < 10.0, (
+                f"{prefix}: PyCMG/NGSPICE off-state id ratio {ratio:.2f} outside [0.1, 10.0]"
+            )
+
+    if check_ids:
+        ids_from_components = py["id"] - py["is"]
+        assert abs(py["ids"] - ids_from_components) < 1e-15, (
+            f"{prefix}: ids ({py['ids']:.3e}) != id - is ({ids_from_components:.3e})"
+        )
+        ng_ids = ng["id"] - ng["is"]
+        assert_close(f"{prefix}/ids", py["ids"], ng_ids, rel_tol=rel_tol)
