@@ -33,6 +33,14 @@ OUTPUT_KEYS: List[str] = [
     "cgg", "cgd", "cgs", "cdg", "cdd",
 ]
 
+# NN training target columns — subset of OUTPUT_KEYS (13 of 17)
+# Excludes ig, is, ie, ids which are not needed for circuit simulation.
+NN_OUTPUT_COLUMNS: List[str] = [
+    "id", "gm", "gds", "gmb",
+    "qg", "qd", "qs", "qb",
+    "cgg", "cgd", "cgs", "cdg", "cdd",
+]
+
 GEOM_COLUMNS: List[str] = ["tech", "device", "L", "NFIN", "TFIN", "temp_K"]
 
 VOLTAGE_COLUMNS: List[str] = ["Vg", "Vd", "Vs", "Ve", "Vth"]
@@ -99,47 +107,58 @@ def build_voltage_grid(
     vd_points: int = 50,
     dense_ratio: float = 0.6,
     voltage_scale: float = 1.0,
+    v_min: float = 0.0,
+    n_dense_mid: int = 0,
+    vth_center: Optional[float] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build a non-uniform Vg grid (dense near threshold) and uniform Vd grid.
 
-    The Vg grid concentrates points around the threshold voltage to better
-    capture the subthreshold-to-saturation transition, which is critical for
-    neural network training accuracy.
+    Extends the original with three new parameters:
+      v_min: Lower voltage bound (default 0.0 = existing behavior). Use -vdd
+          for NN source-relative training data that covers NR overshoot.
+      n_dense_mid: Extra dense points near the mid-supply crossing
+          ((v_min + v_max) / 2). 0 = disabled (default).
+      vth_center: Explicit signed threshold center for dense region. When None
+          (default), uses ``vth_mag`` (positive, backward-compatible). Pass a
+          negative value for PMOS source-relative frame (e.g., -0.2).
 
     Args:
         vdd: Nominal supply voltage (used for dense region width calculation).
-        vth_mag: Threshold voltage magnitude for dense region centering.
-        vg_points: Total target number of Vg points.
+        vth_mag: Threshold voltage magnitude (backward-compat; used when
+            vth_center is None).
+        vg_points: Total target Vg points (dense + sparse).
         vd_points: Number of Vd points (uniform).
-        dense_ratio: Fraction of vg_points allocated to the dense region.
-        voltage_scale: Multiplier for voltage range upper bound. Use 2.0
-            to extend sweeps to 2*VDD for NN simulator convergence training.
+        dense_ratio: Fraction of vg_points in dense threshold region.
+        voltage_scale: Upper bound multiplier: v_max = vdd * voltage_scale.
+        v_min: Lower voltage bound (signed). Default 0.0.
+        n_dense_mid: Extra dense points near the mid-supply crossing.
+        vth_center: Signed threshold center. None → use vth_mag.
 
     Returns:
-        Tuple of ``(vg_array, vd_array)``, both sorted with no duplicates.
+        Tuple of (vg_array, vd_array), both sorted, no duplicates.
     """
     v_max = vdd * voltage_scale
+    _vth = vth_center if vth_center is not None else vth_mag
 
-    # Dense region: +/- 0.15*Vdd around Vth, clipped to [0, v_max]
-    dense_lo = max(0.0, vth_mag - 0.15 * vdd)
-    dense_hi = min(v_max, vth_mag + 0.15 * vdd)
+    # Dense region: ±0.15·Vdd around threshold, clipped to [v_min, v_max]
+    dense_lo = max(v_min, _vth - 0.15 * vdd)
+    dense_hi = min(v_max, _vth + 0.15 * vdd)
 
     n_dense = int(vg_points * dense_ratio)
     n_sparse = vg_points - n_dense
 
-    # Dense points in the threshold region
     vg_dense = np.linspace(dense_lo, dense_hi, n_dense)
+    vg_sparse = np.linspace(v_min, v_max, n_sparse)
 
-    # Sparse points across the full range
-    vg_sparse = np.linspace(0.0, v_max, n_sparse)
+    parts = [vg_dense, vg_sparse]
+    if n_dense_mid > 0:
+        mid = (v_min + v_max) / 2.0
+        mid_lo = mid - 0.15 * vdd
+        mid_hi = mid + 0.15 * vdd
+        parts.append(np.linspace(mid_lo, mid_hi, n_dense_mid))
 
-    # Merge, sort, deduplicate
-    vg_all = np.concatenate([vg_dense, vg_sparse])
-    vg_all = np.sort(vg_all)
-    vg_all = np.unique(vg_all)
-
-    # Vd: uniform
-    vd_all = np.linspace(0.0, v_max, vd_points)
+    vg_all = np.unique(np.concatenate(parts))
+    vd_all = np.linspace(v_min, v_max, vd_points)
 
     return vg_all, vd_all
 
@@ -540,6 +559,47 @@ def to_csv(
         written.append(os.path.abspath(filepath))
 
     return written
+
+
+def save_npz(
+    inputs: np.ndarray,
+    geometry: np.ndarray,
+    outputs: np.ndarray,
+    output_path: "str | Path",
+    metadata: "Optional[Dict[str, object]]" = None,
+) -> None:
+    """Save NN training arrays to a .npz file.
+
+    The .npz layout is the contract between pycmg data generation and the
+    nn_model training pipeline:
+      inputs   (N, 4)  — source-relative terminal voltages [Vd, Vg, Vs, Vb]
+      geometry (N, 15) — [NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW,
+                           CFS, TOXP, CGSL, UA, EU]
+      outputs  (N, 13) — NN_OUTPUT_COLUMNS order
+
+    Optional metadata keys are saved as ``meta_<key>`` arrays.
+
+    Args:
+        inputs: (N, 4) float64 array.
+        geometry: (N, 15) float64 array.
+        outputs: (N, 13) float64 array.
+        output_path: Destination file path.
+        metadata: Optional dict of scalar/array metadata.
+    """
+    output_path = str(output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    save_dict: Dict[str, object] = {
+        "inputs": inputs,
+        "geometry": geometry,
+        "outputs": outputs,
+    }
+    if metadata:
+        for k, v in metadata.items():
+            save_dict[f"meta_{k}"] = np.array(v)
+    np.savez(output_path, **save_dict)
+    final_path = output_path if output_path.endswith(".npz") else output_path + ".npz"
+    size_kb = os.path.getsize(final_path) / 1024
+    print(f"  Saved {inputs.shape[0]} samples → {output_path} ({size_kb:.0f} KB)")
 
 
 # ---------------------------------------------------------------------------
