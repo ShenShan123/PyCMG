@@ -294,43 +294,70 @@ class Instance:
         return out
 
     @staticmethod
+    def _schur_condense(full: np.ndarray,
+                        external: List[int],
+                        internal: List[int]) -> Optional[np.ndarray]:
+        """Schur complement condensation: reduce NxN matrix to external-only.
+
+        Computes: M_ee - M_ei @ M_ii^{-1} @ M_ie
+
+        Works for both real and complex matrices (capacitance uses complex
+        Y = G + jωC; resistive Jacobian uses real G).
+
+        Args:
+            full: NxN matrix (real or complex)
+            external: indices of external (terminal) nodes
+            internal: indices of internal nodes
+
+        Returns:
+            ne×ne condensed matrix (same dtype as input), or None if
+            the internal node matrix is singular (LinAlgError).
+        """
+        ne = len(external)
+        ni = len(internal)
+        dtype = full.dtype
+
+        m_ee = np.zeros((ne, ne), dtype=dtype)
+        for r in range(ne):
+            for c in range(ne):
+                m_ee[r, c] = full[external[r], external[c]]
+
+        if ni == 0:
+            return m_ee
+
+        m_ei = np.zeros((ne, ni), dtype=dtype)
+        m_ie = np.zeros((ni, ne), dtype=dtype)
+        m_ii = np.zeros((ni, ni), dtype=dtype)
+        for r in range(ne):
+            for c in range(ni):
+                m_ei[r, c] = full[external[r], internal[c]]
+        for r in range(ni):
+            for c in range(ne):
+                m_ie[r, c] = full[internal[r], external[c]]
+            for c in range(ni):
+                m_ii[r, c] = full[internal[r], internal[c]]
+
+        try:
+            m_ie_sol = np.linalg.solve(m_ii, m_ie)
+        except np.linalg.LinAlgError:
+            return None
+
+        return m_ee - m_ei @ m_ie_sol
+
+    @staticmethod
     def _condense_capacitance(g_full: np.ndarray,
                               c_full: np.ndarray,
                               external: List[int],
                               internal: List[int]) -> np.ndarray:
         ne = len(external)
-        ni = len(internal)
         c_condensed = np.zeros((ne, ne), dtype=float)
         if ne == 0:
             return c_condensed
-        jw = 1j
-        yee = np.zeros((ne, ne), dtype=complex)
-        yei = np.zeros((ne, ni), dtype=complex)
-        yie = np.zeros((ni, ne), dtype=complex)
-        yii = np.zeros((ni, ni), dtype=complex)
-        for r in range(ne):
-            for c in range(ne):
-                yee[r, c] = g_full[external[r], external[c]] + jw * c_full[external[r], external[c]]
-            for c in range(ni):
-                yei[r, c] = g_full[external[r], internal[c]] + jw * c_full[external[r], internal[c]]
-        for r in range(ni):
-            for c in range(ne):
-                yie[r, c] = g_full[internal[r], external[c]] + jw * c_full[internal[r], external[c]]
-            for c in range(ni):
-                yii[r, c] = g_full[internal[r], internal[c]] + jw * c_full[internal[r], internal[c]]
-        if ni == 0:
-            c_condensed[:, :] = np.imag(yee)
-            return c_condensed
-        try:
-            yie_sol = np.linalg.solve(yii, yie)
-        except np.linalg.LinAlgError:
-            return c_condensed
-        for r in range(ne):
-            for c in range(ne):
-                accum = yee[r, c]
-                accum -= np.dot(yei[r, :], yie_sol[:, c])
-                c_condensed[r, c] = float(np.imag(accum))
-        return c_condensed
+        y_full = g_full.astype(complex) + 1j * c_full.astype(complex)
+        y_condensed = Instance._schur_condense(y_full, external, internal)
+        if y_condensed is None:
+            return c_condensed  # zeros on singular internal matrix (matches old behavior)
+        return np.imag(y_condensed).astype(float)
 
     def _condense_caps(self) -> Dict[str, float]:
         """Extract condensed capacitance matrix matching SPICE convention.
@@ -395,42 +422,22 @@ class Instance:
         g_full = self._build_full_jacobian(self._sim, self._sim.jacobian_resist)
 
         # Condense to external-only using Schur complement
-        # (same math as _condense_capacitance but real-valued)
         ext = self._sim.terminal_indices
         intn = self._sim.internal_indices
-        ne = len(ext)
-        ni = len(intn)
+        g_condensed = self._schur_condense(g_full, ext, intn)
 
-        g_ee = np.zeros((ne, ne))
-        for r in range(ne):
-            for c in range(ne):
-                g_ee[r, c] = g_full[ext[r], ext[c]]
-
-        if ni == 0:
-            return g_ee
-
-        g_ei = np.zeros((ne, ni))
-        g_ie = np.zeros((ni, ne))
-        g_ii = np.zeros((ni, ni))
-
-        for r in range(ne):
-            for c in range(ni):
-                g_ei[r, c] = g_full[ext[r], intn[c]]
-        for r in range(ni):
-            for c in range(ne):
-                g_ie[r, c] = g_full[intn[r], ext[c]]
-            for c in range(ni):
-                g_ii[r, c] = g_full[intn[r], intn[c]]
-
-        try:
-            g_ie_sol = np.linalg.solve(g_ii, g_ie)
-        except np.linalg.LinAlgError:
-            # Fallback: no condensation; negate for terminal current convention
+        if g_condensed is None:
+            # Fallback: return external-only block negated (matches old behavior)
+            ne = len(ext)
+            g_ee = np.zeros((ne, ne))
+            for r in range(ne):
+                for c in range(ne):
+                    g_ee[r, c] = g_full[ext[r], ext[c]]
             return -g_ee
 
         # Negate: OSDI jacobian_resist stores dF/dV where F is KCL residual
         # (current into node). Terminal currents use I = -F, so dI/dV = -dF/dV.
-        return -(g_ee - g_ei @ g_ie_sol)
+        return -g_condensed
 
     def eval_dc(self, nodes: Dict[str, float]) -> Dict[str, float]:
         """
