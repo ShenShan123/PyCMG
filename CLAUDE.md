@@ -37,7 +37,9 @@ pycmg-wrapper/
 │   ├── model.py             # Model, Instance (public API), eval_dc, eval_tran, get_jacobian_matrix
 │   ├── tech.py              # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig, resolve_modelcard)
 │   ├── sweep.py             # Sweep engine (SweepConfig, sweep_dc, generate_dataset, to_csv)
-│   └── sensitivity.py       # OAT sensitivity analysis (compute_sensitivity, enumerate_model_params)
+│   ├── sensitivity.py       # OAT sensitivity analysis (compute_sensitivity, enumerate_model_params)
+│   ├── nn_config.py         # NN training config (ProcessParams, NNTechConfig, extract_process_params)
+│   └── nn_generate.py       # NN .npz data generation using PDK-driven (L, NFIN) combos
 ├── tests/                    # Test suite (280 tests)
 │   ├── __init__.py          # Package init
 │   ├── conftest.py          # Tiered technology registry (5 base + 16 Vt variants = 21 total)
@@ -53,6 +55,7 @@ pycmg-wrapper/
 │   └── test_vt_variants.py  # Core Vt variant DC verification (lvt/slvt/sram/ulvt/elvt/hvt/lnvt)
 ├── scripts/                  # Utility scripts
 │   ├── generate_training_data.py # CLI for training data generation
+│   ├── generate_nn_data.py  # CLI: generates universal_nmos.npz / universal_pmos.npz
 │   ├── sensitivity_analysis.py   # CLI for process parameter sensitivity analysis
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── modelcards/               # Technology model cards
@@ -311,6 +314,12 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - **`model_overrides` writes to a shared `OsdiModel` buffer.** Creating multiple Instances from the same Model with different `model_overrides` will silently corrupt earlier Instances. For per-instance process variation, create a separate `Model()` per override set.
 - **Device polarity must come from `DeviceConfig.inst_params["DEVTYPE"]`**, not from substring matching on device names. `DEVTYPE=1` is NMOS, `DEVTYPE=0` is PMOS.
 - **Cache terminal index lookups** (`_term_g`, `_term_d`, `_term_s`) after `bind_simulation`. Do not re-scan `terminal_indices` on every `eval_dc` call.
+
+### NN Data Generation
+- Legal (L, NFIN) combos come from `DeviceConfig.get_geometry_combos(pdk_path)` for TSMC, or a fallback NFIN list for ASAP7.
+- Process parameters are extracted on-the-fly from the resolved modelcard via `extract_process_params(model.modelcard_params)`. They are NOT hardcoded in config.
+- Each (L, NFIN) bin gets its own `Model()` instance to avoid shared-buffer corruption (see "Instance / Model Isolation" constraint).
+- NFIN < 2 is always filtered out (convergence failures documented above).
 
 ### Newton-Raphson Limiting (`_pnjlim`)
 - Always guard `math.log(vnew / vt)` against `vnew <= 0`. Fall back to `vcrit` when the argument would be non-positive.
