@@ -4,121 +4,47 @@ Body Bias Verification Tests
 Verifies model accuracy with non-zero body bias (bulk terminal voltage)
 for both NMOS and PMOS devices across all 5 technologies.
 
-Existing tests all use ve=0.0 (grounded bulk). This test exercises:
-  - Reverse body bias (RBB): increases threshold voltage, reduces leakage
-  - Forward body bias (FBB): decreases threshold voltage, increases drive
-
-Key parameter: gmb (bulk transconductance) is the primary target — it is
-only meaningfully exercised when ve != 0.
-
-Test matrix: 5 techs x 2 devices x 2 bias conditions = 20 tests
-
 Run: pytest tests/test_body_bias.py -v
 """
 
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 
-from pycmg import Model, Instance
-from tests.helpers import OSDI_PATH, run_ngspice_op, assert_close
-from tests.conftest import TECHNOLOGIES, TECH_NAMES, get_tech_modelcard
+from tests.helpers import run_dc_comparison
+from tests.conftest import TECHNOLOGIES, TECH_NAMES, requires_osdi
 
 BIAS_TYPES = ["reverse", "forward"]
+BODY_OUTPUTS = ["id", "gm", "gds", "gmb", "ie", "qg", "qd"]
 
 
-@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
+def _body_bias(vdd: float, device: str, bias_type: str) -> dict[str, float]:
+    """Build bias dict for body-bias test."""
+    if device == "nmos":
+        ve = -0.1 if bias_type == "reverse" else 0.1
+        return {"d": vdd / 2, "g": vdd / 2, "s": 0.0, "e": ve}
+    else:
+        ve = vdd + 0.1 if bias_type == "reverse" else vdd - 0.1
+        return {"d": vdd * 0.3, "g": vdd * 0.3, "s": vdd, "e": ve}
+
+
+@requires_osdi
 @pytest.mark.parametrize("tech_name", TECH_NAMES)
+@pytest.mark.parametrize("device", ["nmos", "pmos"])
 @pytest.mark.parametrize("bias_type", BIAS_TYPES)
-def test_nmos_body_bias(tech_name: str, bias_type: str) -> None:
-    """Test NMOS DC outputs match NGSPICE with non-zero body bias.
-
-    Bias conditions (saturation region): vd=vdd/2, vg=vdd/2, vs=0.
-      - Reverse body bias: ve = -0.1 (body more negative than source)
-      - Forward body bias: ve = +0.1 (body more positive than source)
-    """
-    tech = TECHNOLOGIES[tech_name]
-    modelcard, model_name, inst_params = get_tech_modelcard(tech_name, "nmos")
-    vdd = tech["vdd"]
-
-    vd = vdd / 2
-    vg = vdd / 2
-    vs = 0.0
-    ve = -0.1 if bias_type == "reverse" else 0.1
-
-    # PyCMG evaluation
-    model = Model(str(OSDI_PATH), str(modelcard), model_name)
-    inst = Instance(model, params=inst_params)
-    py = inst.eval_dc({"d": vd, "g": vg, "s": vs, "e": ve})
-
-    # NGSPICE reference
-    ng = run_ngspice_op(
-        modelcard, model_name, inst_params,
-        vd, vg, vs, ve,
-        tag=f"body_bias_{tech_name}_nmos_{bias_type}",
-    )
-
-    # Compare currents and derivatives
-    prefix = f"{tech_name}/nmos/body_{bias_type}"
-    assert_close(f"{prefix}/id", py["id"], ng["id"])
-    assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
-    assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
-    assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
-    # Bulk terminal current — primary output affected by body bias
-    assert_close(f"{prefix}/ie", py["ie"], ng["ie"])
-    # Charges
-    assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
-    assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
-
-
-@pytest.mark.skipif(not OSDI_PATH.exists(), reason="missing OSDI build artifact")
-@pytest.mark.parametrize("tech_name", TECH_NAMES)
-@pytest.mark.parametrize("bias_type", BIAS_TYPES)
-def test_pmos_body_bias(tech_name: str, bias_type: str) -> None:
-    """Test PMOS DC outputs match NGSPICE with non-zero body bias.
-
-    Bias conditions (saturation region): vd=vdd*0.3, vg=vdd*0.3, vs=vdd.
-      - Reverse body bias: ve = vdd + 0.1 (body more positive than source for PMOS)
-      - Forward body bias: ve = vdd - 0.1 (body less positive than source for PMOS)
-    """
-    tech = TECHNOLOGIES[tech_name]
+def test_body_bias(tech_name: str, device: str, bias_type: str) -> None:
+    """Test DC outputs match NGSPICE with non-zero body bias."""
+    vdd = TECHNOLOGIES[tech_name]["vdd"]
+    bias = _body_bias(vdd, device, bias_type)
 
     try:
-        modelcard, model_name, inst_params = get_tech_modelcard(tech_name, "pmos")
+        run_dc_comparison(
+            tech_name, device, bias,
+            tag=f"body_bias_{tech_name}_{device}_{bias_type}",
+            outputs=BODY_OUTPUTS,
+        )
     except FileNotFoundError:
-        pytest.skip(f"No PMOS modelcard for {tech_name}")
-
-    vdd = tech["vdd"]
-
-    vd = vdd * 0.3
-    vg = vdd * 0.3
-    vs = vdd
-    ve = vdd + 0.1 if bias_type == "reverse" else vdd - 0.1
-
-    # PyCMG evaluation
-    model = Model(str(OSDI_PATH), str(modelcard), model_name)
-    inst = Instance(model, params=inst_params)
-    py = inst.eval_dc({"d": vd, "g": vg, "s": vs, "e": ve})
-
-    # NGSPICE reference
-    ng = run_ngspice_op(
-        modelcard, model_name, inst_params,
-        vd, vg, vs, ve,
-        tag=f"body_bias_{tech_name}_pmos_{bias_type}",
-    )
-
-    # Compare currents and derivatives
-    prefix = f"{tech_name}/pmos/body_{bias_type}"
-    assert_close(f"{prefix}/id", py["id"], ng["id"])
-    assert_close(f"{prefix}/gm", py["gm"], ng["gm"])
-    assert_close(f"{prefix}/gds", py["gds"], ng["gds"])
-    assert_close(f"{prefix}/gmb", py["gmb"], ng["gmb"])
-    # Bulk terminal current — primary output affected by body bias
-    assert_close(f"{prefix}/ie", py["ie"], ng["ie"])
-    # Charges
-    assert_close(f"{prefix}/qg", py["qg"], ng["qg"])
-    assert_close(f"{prefix}/qd", py["qd"], ng["qd"])
+        pytest.skip(f"No {device} modelcard for {tech_name}")
 
 
 if __name__ == "__main__":
