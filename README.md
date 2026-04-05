@@ -27,21 +27,9 @@ python scripts/generate_training_data.py \
 
 ```python
 import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
-
 df = pd.read_csv("training_data/ASAP7_dc.csv")
 inputs = df[["L", "NFIN", "TFIN", "temp_K", "Vg", "Vd", "Vs", "Ve"]].values
 outputs = df[["ids", "gm", "gds", "cgg", "cgd", "cgs"]].values
-
-class MosfetDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)
-    def __len__(self): return len(self.X)
-    def __getitem__(self, i): return self.X[i], self.y[i]
-
-loader = DataLoader(MosfetDataset(inputs, outputs), batch_size=1024, shuffle=True)
 ```
 
 ## Installation
@@ -368,25 +356,17 @@ Threshold voltage (Vth) is auto-detected per device configuration via the peak-g
 
 ### Loading Data for Training
 
-**Pandas:**
-
 ```python
 import pandas as pd
-
 df = pd.read_csv("training_data/ASAP7_dc.csv")
 nmos = df[df["device"].str.startswith("nmos")]
-print(f"NMOS rows: {len(nmos)}, columns: {list(df.columns)}")
-```
 
-**PyTorch Dataset:**
-
-```python
+# PyTorch
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 class MosfetDataset(Dataset):
     def __init__(self, csv_path, input_cols, output_cols):
-        import pandas as pd
         df = pd.read_csv(csv_path)
         self.X = torch.tensor(df[input_cols].values, dtype=torch.float32)
         self.y = torch.tensor(df[output_cols].values, dtype=torch.float32)
@@ -399,20 +379,6 @@ ds = MosfetDataset(
     output_cols=["ids", "gm", "gds", "cgg", "cgd", "cgs"],
 )
 loader = DataLoader(ds, batch_size=1024, shuffle=True)
-```
-
-**TensorFlow:**
-
-```python
-import tensorflow as tf
-import pandas as pd
-
-df = pd.read_csv("training_data/ASAP7_dc.csv")
-inputs = df[["L", "NFIN", "TFIN", "temp_K", "Vg", "Vd", "Vs", "Ve"]].values
-outputs = df[["ids", "gm", "gds", "cgg", "cgd", "cgs"]].values
-
-dataset = tf.data.Dataset.from_tensor_slices((inputs, outputs))
-dataset = dataset.shuffle(10000).batch(1024).prefetch(tf.data.AUTOTUNE)
 ```
 
 ## Advanced Usage
@@ -568,37 +534,33 @@ The OSDI binary is the single source of truth for all model physics calculations
 
 ### Running the Test Suite
 
+All NGSPICE-backed DC tests use shared infrastructure: `run_dc_comparison()` (helpers.py), `standard_bias_points()` and `@requires_osdi` (conftest.py). Each DC test file is a single parametrized function.
+
 ```bash
 # Quick smoke tests (no NGSPICE required)
-pytest tests/test_api.py -v
-
-# Technology registry tests (no NGSPICE required)
-pytest tests/test_tech.py -v
+pytest tests/test_api.py tests/test_tech.py tests/test_sweep.py -v
 
 # Base technology verification (5 techs, NGSPICE required)
-pytest tests/test_dc_jacobian.py tests/test_dc_regions.py tests/test_transient.py -v
+pytest tests/test_dc_regions.py tests/test_dc_jacobian.py tests/test_transient.py -v
 
-# Vt variant verification (16 additional Vt flavors)
-pytest tests/test_vt_variants.py -v
-
-# Full suite (280 tests)
+# Full suite (280 tests, ~18 min with NGSPICE)
 pytest tests/ -v
 ```
 
 | Test File | Tests | Description | NGSPICE |
 |-----------|-------|-------------|---------|
 | `test_api.py` | 20 | API smoke tests | No |
-| `test_tech.py` | 13 | Technology registry and config tests | No |
-| `test_sweep.py` | 27 | Sweep engine tests | No |
+| `test_tech.py` | 13 | Technology registry | No |
+| `test_sweep.py` | 27 | Sweep engine | No |
+| `test_sensitivity.py` | 7 | Sensitivity analysis | No |
 | `test_nfin_scaling.py` | 2 | NFIN scaling sanity | No |
-| `test_sensitivity.py` | 7 | Sensitivity analysis tests | No |
-| `test_dc_jacobian.py` | 30 | DC Jacobian (gm, gds, gmb) vs NGSPICE | Yes |
-| `test_dc_regions.py` | 30 | DC operating regions (off/linear/saturation) vs NGSPICE | Yes |
-| `test_transient.py` | 10 | Transient waveforms vs NGSPICE | Yes |
-| `test_ac_caps.py` | 15 | AC capacitances vs NGSPICE | Yes |
-| `test_body_bias.py` | 20 | Body bias verification vs NGSPICE | Yes |
-| `test_temperature.py` | 10 | Temperature sweep vs NGSPICE | Yes |
-| `test_vt_variants.py` | 96 | Vt variant DC verification vs NGSPICE | Yes |
+| `test_dc_regions.py` | 30 | DC off/linear/saturation, 5 techs × 2 devices × 3 regions | Yes |
+| `test_dc_jacobian.py` | 30 | DC Jacobian (central finite-diff), 5 techs × 2 devices × 3 regions | Yes |
+| `test_transient.py` | 10 | Transient waveforms, 5 techs × 2 devices | Yes |
+| `test_ac_caps.py` | 15 | AC capacitances (cgg/cgd/cgs/cdg/cdd) | Yes |
+| `test_body_bias.py` | 20 | Body bias, 5 techs × 2 devices × 2 bias types | Yes |
+| `test_temperature.py` | 10 | Temperature (-40/85/125C), ASAP7+TSMC7 | Yes |
+| `test_vt_variants.py` | 96 | Vt variant DC, 16 variants × 2 devices × 3 regions | Yes |
 
 ## Project Structure
 

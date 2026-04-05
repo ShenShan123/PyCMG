@@ -102,7 +102,8 @@ pycmg-wrapper/
   - `Instance`: Device instance with DC/TRAN evaluation
   - `eval_dc()`: DC operating point evaluation
   - `eval_tran()`: Transient evaluation
-  - `get_jacobian_matrix()`: Jacobian extraction
+  - `get_jacobian_matrix()`: 4×4 condensed Jacobian extraction
+  - `_schur_condense()`: Shared Schur complement condensation (used by both `_condense_capacitance()` and `get_jacobian_matrix()`)
 
 * **`pycmg/sensitivity.py`**: OAT sensitivity analysis
   - `enumerate_model_params()`: Discover all real-valued model-level parameters from OSDI descriptor
@@ -112,28 +113,34 @@ pycmg-wrapper/
   - `SensitivityResult`: Result container with sensitivities, rankings, bias points
 
 * **`tests/helpers.py`**: Verification and testing utilities
-  - NGSPICE runner helpers
-  - Comparison functions (DC, AC, TRAN)
-  - Technology modelcard handling
+  - NGSPICE runner helpers: `run_ngspice_op()`, `run_ngspice_ac()`, `run_ngspice_transient()`
+  - `run_dc_comparison()`: Unified DC verification helper (PyCMG eval_dc vs NGSPICE OP with assert_close). Replaces boilerplate across all DC test files.
+  - `assert_close()`: Auto-tolerance assertion (selects abs_tol by output type: current/charge/conductance/capacitance)
+  - `bake_inst_params()`: Injects instance params into modelcard for NGSPICE OSDI compatibility
   - Modelcard baking for NGSPICE
 
-* **`tests/conftest.py`**: Tiered technology registry
+* **`tests/conftest.py`**: Tiered technology registry + shared test utilities
   - `TECHNOLOGIES` dict (Tier 1): 5 base technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
   - `CORE_VT_VARIANTS` dict (Tier 2): 16 additional Vt flavors (lvt, slvt, sram, ulvt, elvt, hvt, lnvt)
   - `ALL_TECHNOLOGIES` dict: Union of Tier 1 + Tier 2 (21 total entries)
   - `get_tech_modelcard()`: Retrieves modelcard path, model name, and instance params from ALL_TECHNOLOGIES
   - `TECH_NAMES` / `CORE_VT_NAMES` / `ALL_TECH_NAMES`: Lists for test parametrization
+  - `requires_osdi`: Shared skip marker for tests requiring the OSDI binary
+  - `standard_bias_points(vdd, device_type)`: Canonical bias points (off/linear/saturation) for DC tests
+  - `REGION_NAMES`: `["off", "linear", "saturation"]`
 
 * **`tests/`**: Test suite (280 tests total)
+  - All NGSPICE-backed DC tests use `run_dc_comparison()` from helpers.py and `standard_bias_points()` from conftest.py
+  - All NGSPICE-backed tests use `@requires_osdi` skip marker from conftest.py
   - `test_api.py`: Quick smoke tests for public API (no NGSPICE comparison)
-  - `test_dc_jacobian.py`: DC Jacobian verification, NMOS+PMOS across all 5 base technologies
-  - `test_dc_regions.py`: DC operating region tests (off/linear/saturation), NMOS+PMOS across all 5 base technologies
-  - `test_transient.py`: Transient waveform verification, NMOS+PMOS across all 5 base technologies
-  - `test_ac_caps.py`: AC capacitance verification (cgg, cgd, cgs, cdg, cdd) vs NGSPICE
-  - `test_body_bias.py`: Body bias (Ve != 0) verification across all 5 base technologies
-  - `test_temperature.py`: Temperature verification (-40C, 85C, 125C) vs NGSPICE
+  - `test_dc_jacobian.py`: DC Jacobian (central finite-diff vs analytical), NMOS+PMOS × 5 techs × 3 regions (30 tests)
+  - `test_dc_regions.py`: DC operating regions (off/linear/saturation), NMOS+PMOS × 5 techs × 3 regions (30 tests)
+  - `test_transient.py`: Transient waveform verification, NMOS+PMOS × 5 techs (10 tests)
+  - `test_ac_caps.py`: AC capacitance verification (cgg, cgd, cgs, cdg, cdd) vs NGSPICE (15 tests)
+  - `test_body_bias.py`: Body bias (Ve != 0), NMOS+PMOS × 5 techs × 2 bias types (20 tests)
+  - `test_temperature.py`: Temperature (-40C, 85C, 125C), ASAP7+TSMC7 × NMOS+PMOS (10 tests)
   - `test_nfin_scaling.py`: NFIN scaling sanity tests (PyCMG-only)
-  - `test_vt_variants.py`: Core Vt variant DC verification, NMOS+PMOS across 16 Vt flavors (96 tests)
+  - `test_vt_variants.py`: Vt variant DC verification, NMOS+PMOS × 16 variants × 3 regions (96 tests)
 
 ## PyCMG Output Coverage
 
@@ -230,25 +237,16 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
     3.  Compare currents ($I_d, I_g$) and Derivatives ($g_m, g_{ds}$) numerically.
     4.  Assert accuracy within accepted tolerance (e.g., `ABS_TOL_I=1e-9`, `REL_TOL=5e-3`).
 * **Test Strategy:**
+    * **Shared infrastructure** (`tests/conftest.py` + `tests/helpers.py`):
+      - `requires_osdi` skip marker, `standard_bias_points()`, `REGION_NAMES` (conftest)
+      - `run_dc_comparison()` unified DC comparison helper (helpers)
+      - All DC test files use these shared utilities — no duplicated comparison boilerplate
     * **Technology Registry** (`tests/conftest.py`): Tiered parametrization
       - Tier 1 (`TECHNOLOGIES`): 5 base technologies (ASAP7, TSMC5, TSMC7, TSMC12, TSMC16)
       - Tier 2 (`CORE_VT_VARIANTS`): 16 Vt variants (ASAP7 lvt/slvt/sram, TSMC ulvt/elvt/hvt/lnvt)
       - Each entry has vdd, modelcard paths, model names, instance params
-    * **DC Jacobian tests** (`tests/test_dc_jacobian.py`): Verify DC derivatives vs NGSPICE
-      - Tests all 5 base technologies using Tier 1 registry
-      - Covers gm, gds, gmb derivatives
-    * **DC Region tests** (`tests/test_dc_regions.py`): DC operating region verification
-      - Tests all 5 base technologies using Tier 1 registry
-      - Covers subthreshold, linear, saturation regions
-    * **Transient tests** (`tests/test_transient.py`): Transient waveform verification
-      - Tests all 5 base technologies using Tier 1 registry
-      - Covers charge/ discharge waveforms
-    * **Vt Variant tests** (`tests/test_vt_variants.py`): Cross-Vt DC verification
-      - Tests all 16 Vt variants using Tier 2 registry
-      - Covers saturation, linear, subthreshold regions for NMOS+PMOS
-    * **API tests** (`tests/test_api.py`): Quick smoke tests
-      - Basic functionality verification
-      - No NGSPICE comparison (fast execution)
+    * **DC tests** use parametrized `(tech_name, device, region)` pattern — single function per file
+    * **API tests** (`tests/test_api.py`): Quick smoke tests (no NGSPICE)
 
 ## Development Rules
 1.  **No Circuit Solvers:** The Python code must not contain KCL/KVL solvers or circuit simulation logic. It is strictly a Model Evaluator ($V \to I, Q, Jacobian$).
