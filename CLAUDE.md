@@ -349,6 +349,10 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - NFIN-aware modelcard generation: `resolve_modelcard()` accepts NFIN to select correct NFIN group variant; cache includes NFIN in filename.
 - Sensitivity analysis: `pycmg/sensitivity.py` with OAT perturbation, `scripts/sensitivity_analysis.py` CLI.
 - Sensitivity tests: `tests/test_sensitivity.py` (7 tests).
+- NN training config: `pycmg/nn_config.py` (ProcessParams, NNTechConfig, extract_process_params, TECH_CONFIGS). No hardcoded process params; extracted on-the-fly from modelcards.
+- NN data generation: `pycmg/nn_generate.py` (generate_dataset, generate_universal_dataset). PDK-driven (L, NFIN) combos, source-relative voltage frame, .npz output (inputs/geometry/outputs). 954 total geometry combos across 5 techs, 21 variants.
+- NN data CLI: `scripts/generate_nn_data.py` (--device, --tech, --universal, --n-dense-mid).
+- Sweep extensions: `NN_OUTPUT_COLUMNS` (13 subset of OUTPUT_KEYS), `save_npz()`, `build_voltage_grid()` extended with `v_min`, `n_dense_mid`, `vth_center` params.
 - **Not yet covered**: I/O voltage-domain devices (1.2V/1.8V), PVT corners (SS/FF), RF variants.
 
 ## Technology Modelcard Verification

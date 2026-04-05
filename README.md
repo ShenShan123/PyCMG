@@ -272,6 +272,53 @@ print(result.sensitivities["phig"])  # {'ids': 94.02, 'gm': 29.70, ...}
 
 The analysis evaluates at 4 representative bias points (subthreshold, linear, saturation, strong inversion) using central-difference perturbation and normalized sensitivity.
 
+### NN Training Data Generation (.npz)
+
+For neural network compact model training, PyCMG provides a dedicated `.npz` data generator that:
+- Enumerates **PDK-legal (L, NFIN) bin boundaries** for TSMC techs (or uses a fallback NFIN list for ASAP7)
+- Extracts **process parameters on-the-fly** from the resolved modelcard for each (L, NFIN) bin
+- Sweeps in a **source-relative frame** (Vs=0, Vb=0) with extended voltage range covering NR overshoot
+- Writes geometry as 15 columns: `[NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW, CFS, TOXP, CGSL, UA, EU]`
+
+```bash
+# Generate universal dataset across all 5 techs and 21 variants
+python scripts/generate_nn_data.py --device both --universal
+
+# Single technology
+python scripts/generate_nn_data.py --device nmos --tech tsmc7
+
+# Add dense mid-supply sampling for transient accuracy
+python scripts/generate_nn_data.py --device both --universal --n-dense-mid 30
+
+# Custom output directory
+python scripts/generate_nn_data.py --device both --universal --data-dir ./my_data
+```
+
+**Python API:**
+
+```python
+from pycmg.nn_generate import generate_dataset, generate_universal_dataset
+from pycmg.nn_config import TECH_CONFIGS
+from pycmg.sweep import save_npz
+
+# Single tech
+data = generate_dataset(TECH_CONFIGS["tsmc7"], "nmos")
+save_npz(data["inputs"], data["geometry"], data["outputs"], "tsmc7_nmos.npz")
+
+# Universal (all techs)
+data = generate_universal_dataset("nmos")
+save_npz(data["inputs"], data["geometry"], data["outputs"], "universal_nmos.npz")
+```
+
+**Output format:**
+- `inputs` (N, 4): source-relative terminal voltages `[Vd, Vg, Vs, Vb]`
+- `geometry` (N, 15): `[NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW, CFS, TOXP, CGSL, UA, EU]`
+- `outputs` (N, 13): `[id, gm, gds, gmb, qg, qd, qs, qb, cgg, cgd, cgs, cdg, cdd]`
+
+Process parameters are **per-bin accurate**: for TSMC techs, different (L, NFIN) bins may produce different process param values because the variant overlay differs per bin. This is more accurate than using a single set of process parameters per Vt flavor.
+
+**Coverage:** 954 total (L, NFIN) geometry combos across 5 techs, 21 variants. TSMC techs have 25-36 combos per device (from PDK bin boundaries); ASAP7 has 7 combos per device (fallback list).
+
 ## Supported Technologies
 
 | Technology | Node | Vdd | TFIN | Vt Flavors | Devices |
@@ -446,6 +493,16 @@ vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=100, vd_poin
 vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=100, vd_points=100,
                                      voltage_scale=2.0)
 
+# Source-relative range for NN training (NMOS: [-VDD, 2*VDD])
+vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=71, vd_points=71,
+                                     voltage_scale=2.0, v_min=-0.9,
+                                     vth_center=vth, n_dense_mid=30)
+
+# PMOS source-relative frame ([-2*VDD, +VDD])
+vg_arr, vd_arr = build_voltage_grid(vdd=0.9, vth_mag=vth, vg_points=71, vd_points=71,
+                                     voltage_scale=1.0, v_min=-1.8,
+                                     vth_center=-vth, n_dense_mid=30)
+
 for vg in vg_arr:
     for vd in vd_arr:
         nodes = build_nodes(vg, vd, 0.0, 0.9, "nmos")
@@ -555,7 +612,9 @@ pycmg-wrapper/
 │   ├── model.py                 # Public API (Model, Instance, eval_dc, eval_tran)
 │   ├── tech.py                  # Technology registry (TECH_REGISTRY, DeviceConfig, TechConfig)
 │   ├── sweep.py                 # Sweep engine (generate_dataset, SweepConfig, sweep_dc, to_csv)
-│   └── sensitivity.py           # Sensitivity analysis (compute_sensitivity, SensitivityResult)
+│   ├── sensitivity.py           # Sensitivity analysis (compute_sensitivity, SensitivityResult)
+│   ├── nn_config.py             # NN training config (ProcessParams, NNTechConfig, extract_process_params)
+│   └── nn_generate.py           # NN .npz data generation using PDK-driven (L, NFIN) combos
 ├── tests/                        # Test suite (280 tests)
 │   ├── conftest.py              # Tiered technology registry (21 entries)
 │   ├── helpers.py               # NGSPICE runner helpers, comparison functions
@@ -572,7 +631,8 @@ pycmg-wrapper/
 │   ├── test_nfin_scaling.py     # NFIN scaling sanity
 │   └── test_vt_variants.py      # Vt variant DC verification
 ├── scripts/                      # CLI utilities
-│   ├── generate_training_data.py # Training data generation CLI
+│   ├── generate_training_data.py # Training data generation CLI (CSV format)
+│   ├── generate_nn_data.py      # NN training data CLI (.npz format, PDK-driven geometry)
 │   ├── sensitivity_analysis.py  # Process parameter sensitivity CLI
 │   └── generate_naive_tsmc.py   # Naive TSMC modelcard generator
 ├── modelcards/                   # Technology model cards
@@ -603,7 +663,11 @@ pycmg-wrapper/
 
 **`to_csv(results, output_dir, split_by)`** -- Writes `SweepResult` to CSV files. `split_by` controls grouping: `"tech"` (default), `"device"`, or `"none"`.
 
-**`build_voltage_grid(vdd, vth_mag, vg_points, vd_points, dense_ratio, voltage_scale)`** -- Non-uniform Vg + uniform Vd grid builder. `voltage_scale` extends the grid to `vdd * voltage_scale` (default 1.0).
+**`build_voltage_grid(vdd, vth_mag, vg_points, vd_points, dense_ratio, voltage_scale, v_min, n_dense_mid, vth_center)`** -- Non-uniform Vg + uniform Vd grid builder. `voltage_scale` extends the upper bound to `vdd * voltage_scale` (default 1.0). `v_min` sets the lower bound (default 0.0; use `-vdd` for source-relative NN training). `n_dense_mid` adds extra dense points near mid-supply (default 0). `vth_center` overrides the dense region center (default None = use `vth_mag`; pass negative for PMOS source-relative frame).
+
+**`NN_OUTPUT_COLUMNS`** -- List of 13 NN training target column names (subset of `OUTPUT_KEYS`, excludes `ig`, `is`, `ie`, `ids`).
+
+**`save_npz(inputs, geometry, outputs, output_path, metadata)`** -- Save NN training arrays to `.npz` file with optional metadata.
 
 **`find_threshold(inst, vdd, device_type, n_coarse)`** -- Peak-gm threshold detection.
 
@@ -651,6 +715,28 @@ pycmg-wrapper/
 **`parse_number_with_suffix(s)`** -- Parses SPICE numbers with engineering suffixes (e.g., `"16n"` -> `16e-9`, `"1.5meg"` -> `1.5e6`).
 
 **`scan_pdk_geometry_combos(path, base_name)`** -- Enumerates PDK-defined (L, NFIN) sweep points for a TSMC device. For each variant, returns `(lmin, nfinmin)` and `(lmin, nfinmax)`. Sorted and deduplicated.
+
+### pycmg.nn_config
+
+**`ProcessParams`** -- Dataclass with 12 BSIM-CMG process parameters used as NN input features: `phig`, `u0`, `vsat`, `eot`, `eta0`, `cit`, `rdsw`, `cfs`, `toxp`, `cgsl`, `ua`, `eu`. Methods: `as_array()` (ordered list), `as_dict()`.
+
+**`extract_process_params(modelcard_params)`** -- Extracts the 12 NN process params from a parsed modelcard dict (lowercase keys, as from `Model.modelcard_params`). Missing params default to 0.0.
+
+**`NNTechConfig`** -- NN training config wrapping PyCMG's `TechConfig`. Stores training VDD, variant name list, temperature, and optional fallback NFIN values (for ASAP7). Properties: `name`, `vdd`, `tfin`, `pycmg_tech`. Methods: `get_geometry_combos(device_type, variant)` (returns PDK-legal `(L, NFIN)` pairs), `get_model_name(device_type, variant)`, `resolve_modelcard(device_type, variant, L, NFIN)`.
+
+**`TECH_CONFIGS`** -- Dict of 5 NNTechConfig objects: `asap7`, `tsmc5`, `tsmc7`, `tsmc12`, `tsmc16`.
+
+**`INPUT_COLUMNS`** -- 19 NN input feature names: 4 voltages + `NFIN` + `L` + `T` + 12 process params.
+
+**`OUTPUT_COLUMNS`** -- 13 NN output target names (same as `NN_OUTPUT_COLUMNS`).
+
+### pycmg.nn_generate
+
+**`generate_dataset(tech, device_type, variant_names, verbose, vg_points, vd_points, dense_ratio, n_dense_mid)`** -- Generate NN training data for one tech/polarity. Iterates PDK-legal (L, NFIN) combos, extracts process params on-the-fly. Returns dict with `inputs` (N,4), `geometry` (N,15), `outputs` (N,13), `metadata`.
+
+**`generate_universal_dataset(device_type, verbose, vg_points, vd_points, dense_ratio, n_dense_mid)`** -- Concatenates `generate_dataset()` across all 5 technologies.
+
+**`eval_single_point(inst, vd, vg, vs, vb)`** -- Evaluate one DC bias point. Returns dict of 13 outputs or None on failure.
 
 ## Known Limitations
 
