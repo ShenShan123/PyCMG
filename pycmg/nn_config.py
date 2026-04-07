@@ -50,8 +50,20 @@ INPUT_COLUMNS: List[str] = [
 ]
 
 # Default NFIN values for techs without PDK binning (e.g., ASAP7).
-# NFIN=1 excluded: causes convergence failure in certain TSMC variants.
-DEFAULT_NFIN_VALUES: List[int] = [2, 3, 5, 10, 15, 20, 24]
+# NFIN=1 IS now included as part of Phase D6: nn_generate.py handles
+# OSDI convergence failure per-bin via a smoke-test eval at instance
+# creation, so unstable (variant, NFIN=1) bins are skipped cleanly while
+# stable ones are kept. Variants known to fail include tsmc5:ulvt and
+# tsmc16:lnvt — see CLAUDE.md "NFIN=1 causes convergence failure".
+DEFAULT_NFIN_VALUES: List[int] = [1, 2, 3, 5, 10, 15, 20, 24]
+
+# Default ASAP7 channel-length sweep used by Phase D7 — paper §3 trains
+# on L ∈ [8, 240] nm. ASAP7 modelcards expose a single device-template L,
+# so we override per-bin via the Instance L parameter using this list.
+# TSMC variants enumerate L from PDK bin boundaries automatically.
+DEFAULT_ASAP7_L_VALUES: List[float] = [
+    7e-9, 14e-9, 30e-9, 60e-9, 120e-9, 240e-9,
+]
 
 
 @dataclass
@@ -123,12 +135,13 @@ class NNTechConfig:
     """NN training config that wraps PyCMG's tech registry.
 
     Stores NN-specific data: training VDD, variant name list, temperature.
-    Does NOT store L, NFIN, or ProcessParams — those come from the PDK:
+    Does NOT store ProcessParams — those come from the PDK:
       - Legal (L, NFIN) combos: ``DeviceConfig.get_geometry_combos(pdk_path)``
       - Process params: ``extract_process_params(model.modelcard_params)``
 
-    For ASAP7 (no PDK binning), ``fallback_nfin_values`` provides a default
-    NFIN list to pair with the tech's single L value.
+    For ASAP7 (no PDK binning), ``fallback_nfin_values`` and
+    ``fallback_l_values`` provide explicit lists that get crossed to
+    enumerate (L, NFIN) bins.
     """
     pycmg_name: str
     vdd_train: float
@@ -136,6 +149,7 @@ class NNTechConfig:
     temperature: float = DEFAULT_TEMPERATURE
     default_variant: str = ""
     fallback_nfin_values: Optional[List[int]] = None
+    fallback_l_values: Optional[List[float]] = None
 
     @property
     def name(self) -> str:
@@ -160,11 +174,18 @@ class NNTechConfig:
 
         For TSMC techs: delegates to DeviceConfig.get_geometry_combos(pdk_path),
             which scans the PDK file for bin boundaries.
-        For ASAP7 (no PDK binning): uses fallback_nfin_values with the
-            device's single L (from modelcard).
+        For ASAP7 (no PDK binning): crosses ``fallback_l_values`` with
+            ``fallback_nfin_values``. If only one of the two is set, the
+            other defaults to a sensible single-element list.
 
-        Returns:
-            Sorted list of (L, NFIN) tuples with NFIN >= 2.
+        D6: NFIN=1 is *not* filtered out here. Bins that fail OSDI
+        convergence (e.g. tsmc5:ulvt NFIN=1) are dropped at the
+        instance-creation smoke test in ``nn_generate.generate_dataset``.
+
+        D7: ASAP7 ``fallback_l_values`` defaults to
+        ``DEFAULT_ASAP7_L_VALUES`` (≈ paper's [8, 240] nm range) so the
+        single-L modelcards still cover long-channel geometry via
+        Instance-level L overrides.
         """
         dev = self.pycmg_tech.get_device(f"{device_type}_{variant}")
         pdk_path = self.pycmg_tech.pdk_path
@@ -172,11 +193,15 @@ class NNTechConfig:
         if dev.pdk_device is not None and pdk_path is not None:
             combos = dev.get_geometry_combos(pdk_path=pdk_path)
         else:
-            min_l = dev.get_min_l(pdk_path)
             nfin_list = self.fallback_nfin_values or DEFAULT_NFIN_VALUES
-            combos = [(min_l, float(nfin)) for nfin in nfin_list]
+            l_list = (self.fallback_l_values
+                      or DEFAULT_ASAP7_L_VALUES
+                      or [dev.get_min_l(pdk_path)])
+            combos = [(float(L), float(nfin))
+                      for L in l_list
+                      for nfin in nfin_list]
 
-        return [(L, NFIN) for L, NFIN in combos if NFIN >= 2]
+        return list(combos)
 
     def get_model_name(self, device_type: str, variant: str) -> str:
         """Get model name from PyCMG registry."""
@@ -205,7 +230,10 @@ ASAP7_CONFIG = NNTechConfig(
     vdd_train=0.7,
     variant_names=["rvt", "lvt", "slvt", "sram"],
     default_variant="rvt",
-    fallback_nfin_values=[2, 3, 5, 10, 15, 20, 24],
+    # D6: include NFIN=1; failures are caught per-bin in nn_generate.
+    fallback_nfin_values=[1, 2, 3, 5, 10, 15, 20, 24],
+    # D7: long-channel L sweep — paper §3 trains over [8, 240] nm.
+    fallback_l_values=DEFAULT_ASAP7_L_VALUES,
 )
 
 TSMC5_CONFIG = NNTechConfig(
