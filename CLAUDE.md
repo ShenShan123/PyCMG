@@ -59,17 +59,14 @@ pycmg-wrapper/
 │   ├── sensitivity_analysis.py   # CLI for process parameter sensitivity analysis
 │   └── generate_naive_tsmc.py   # Generalized TSMC naive modelcard generator
 ├── modelcards/               # Technology model cards
-│   ├── ASAP7/               # ASAP7 PDK model files
-│   ├── TSMC5/               # TSMC5 model files
-│   │   └── naive/           # Pre-baked naive modelcards
-│   ├── TSMC7/               # TSMC7 model files
-│   │   └── naive/           # Pre-baked naive modelcards
-│   ├── TSMC12/              # TSMC12 model files
-│   │   └── naive/           # Pre-baked naive modelcards
-│   └── TSMC16/              # TSMC16 model files
-│       └── naive/           # Pre-baked naive modelcards
+│   ├── ASAP7/               # ASAP7 PDK model files (committed)
+│   ├── TSMC5/               # Raw TSMC5 PDK (.l files, gitignored — IP-protected)
+│   ├── TSMC7/               # Raw TSMC7 PDK (.l files, gitignored — IP-protected)
+│   ├── TSMC12/              # Raw TSMC12 PDK (.l files, gitignored — IP-protected)
+│   └── TSMC16/              # Raw TSMC16 PDK (.l files, gitignored — IP-protected)
 ├── build/                    # Build artifacts (generated)
 │   ├── osdi/                # Compiled .osdi files
+│   ├── modelcards/          # Naive TSMC modelcards regenerated on-the-fly by resolve_modelcard()
 │   └── ngspice_eval/        # Verification outputs
 └── CLAUDE.md                 # This file
 ```
@@ -340,7 +337,7 @@ openvaf -I bsim-cmg-va/code -o bsimcmg.osdi bsim-cmg-va/code/bsimcmg_main.va
 - API tests: `tests/test_api.py` quick smoke tests (no NGSPICE).
 - Environment override: set `ASAP7_MODELCARD` to a file or directory to redirect ASAP7 inputs.
 - C++ OSDI host: removed (was `cpp/osdi_host.cpp`); Python uses ctypes directly via `pycmg/core.py`.
-- Naive modelcard generation: `scripts/generate_naive_tsmc.py` generates all Vt flavors from raw PDKs. `generate_naive_tsmc_modelcard` delegates to `parse_tsmc_pdk` for the merge step — do not duplicate the global+variant merge logic.
+- Naive modelcard generation: `scripts/generate_naive_tsmc.py` (batch CLI) and `pycmg.tech.resolve_modelcard` (runtime, on-the-fly) both delegate to `generate_naive_tsmc_modelcard` → `parse_tsmc_pdk` for the merge step. Pre-baked naive modelcards are no longer committed; tests regenerate them via `resolve_modelcard(..., NFIN=<test NFIN>)` and cache under `build/modelcards/`.
 - Extended voltage range: `SweepConfig.voltage_scale` (default 1.0, use 2.0 for 2*VDD) for NN simulator convergence training.
 - PDK geometry sweep: `SweepConfig.sweep_geometry` (default True) enumerates PDK-defined (L, NFIN) combinations from variant bin boundaries.
 - PDK introspection: `scan_pdk_geometry_combos()` returns all (lmin, nfin) sweep points; `_scan_all_variants()` returns parsed variant metadata.
@@ -359,13 +356,17 @@ All verification tests use the tiered technology registry in `tests/conftest.py`
 
 ### Tier 1: Base Technology Registry (5 entries)
 
-| Technology | Vdd | NMOS Modelcard | PMOS Modelcard | NMOS L | PMOS L |
+TSMC entries resolve their modelcards at test time via ``resolve_modelcard``
+(pass NFIN so the correct NFIN-group variant is picked). The cached files
+live under ``build/modelcards/TSMC{5,7,12,16}/``.
+
+| Technology | Vdd | NMOS PDK device | PMOS PDK device | NMOS L | PMOS L |
 |------------|-----|----------------|----------------|--------|--------|
 | ASAP7 | 0.9V | 7nm_TT_160803.pm (rvt) | 7nm_TT_160803.pm (rvt) | 7nm | 7nm |
-| TSMC5 | 0.65V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
-| TSMC7 | 0.75V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
-| TSMC12 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
-| TSMC16 | 0.80V | nch_svt_mac_l16nm.l | pch_lvt_mac_l20nm.l | 16nm | 20nm |
+| TSMC5 | 0.65V | nch_svt_mac | pch_lvt_mac | 16nm | 20nm |
+| TSMC7 | 0.75V | nch_svt_mac | pch_lvt_mac | 16nm | 20nm |
+| TSMC12 | 0.80V | nch_svt_mac | pch_lvt_mac | 16nm | 20nm |
+| TSMC16 | 0.80V | nch_svt_mac | pch_lvt_mac | 16nm | 20nm |
 
 ### Tier 2: Core Vt Variants (16 entries)
 
