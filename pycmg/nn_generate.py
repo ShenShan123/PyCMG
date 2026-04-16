@@ -235,6 +235,53 @@ def _anchor_points(
     ]
 
 
+def _vds_zero_line_points(
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """Dense samples along Vds=0 to enforce the Id(Vds=0)=0 boundary.
+
+    Returns (vg, vd=0, vbs) tuples spanning the full Vg range at Vds=0.
+    60 points per bin (20 Vg x 3 Vbs).
+    """
+    s = -1.0 if is_pmos else 1.0
+    vg_steps = np.linspace(0, s * 2.0 * vdd, 20)
+    vbs_steps = [0.0, s * 0.25 * vdd, s * 0.5 * vdd]
+    return [(float(vg), 0.0, float(vbs)) for vg in vg_steps for vbs in vbs_steps]
+
+
+def _subthreshold_transition_points(
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """Dense sweep in the subthreshold-to-transition Vgs region.
+
+    Covers Vgs from 0 to 60 %% VDD crossed with Vds from 0 to VDD.
+    This is where the inverter VTC slope is steepest and sign accuracy
+    matters most.  300 points per bin (30 Vg x 10 Vd).
+    """
+    s = -1.0 if is_pmos else 1.0
+    vg_steps = np.linspace(0, s * 0.6 * vdd, 30)
+    vd_steps = np.linspace(0, s * vdd, 10)
+    return [(float(vg), float(vd), 0.0) for vg in vg_steps for vd in vd_steps]
+
+
+def _small_vds_points(
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """Dense samples at small |Vds| where the analytical Vds correction is active.
+
+    Improves intrinsic NN accuracy in the linear/triode region so the
+    inference-time correction has less work to do.
+    120 points per bin (8 Vds x 15 Vg).
+    """
+    s = -1.0 if is_pmos else 1.0
+    vds_vals = [s * v for v in [0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]]
+    vg_steps = np.linspace(0, s * vdd, 15)
+    return [(float(vg), float(vd), 0.0) for vd in vds_vals for vg in vg_steps]
+
+
 # ── Per-bin worker (D4 — picklable for multiprocessing) ──────────────────────
 
 def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
@@ -273,6 +320,20 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
         inputs.append(np.array([vd, vg, 0.0, vbs]))
         geometry.append(geo.copy())
         outputs.append(np.array([result[k] for k in NN_OUTPUT_COLUMNS]))
+
+    # Dense targeted points: Vds=0 boundary, subthreshold, small Vds.
+    # ~480 extra points per bin to improve circuit-level accuracy.
+    for _gen_fn in (_vds_zero_line_points,
+                    _subthreshold_transition_points,
+                    _small_vds_points):
+        for vg, vd, vbs in _gen_fn(spec.vdd, is_pmos):
+            result = eval_single_point(inst, vd=vd, vg=vg, vs=0.0, vb=vbs)
+            if result is None:
+                failed += 1
+                continue
+            inputs.append(np.array([vd, vg, 0.0, vbs]))
+            geometry.append(geo.copy())
+            outputs.append(np.array([result[k] for k in NN_OUTPUT_COLUMNS]))
 
     # LHS samples in the wide voltage box.
     lhs = _sample_lhs_voltages(
@@ -486,7 +547,7 @@ def generate_dataset(
 
     if verbose:
         print(f"\n{tech.name} {device_type}: {len(bins)} bins "
-              f"({len(bins) * n_lhs_samples:,} expected LHS samples + anchors) "
+              f"({len(bins) * n_lhs_samples:,} LHS + ~{len(bins) * 489} targeted) "
               f"[T sweep {len(temperatures)} pts, box={voltage_box_factor}·VDD]")
 
     results = _run_bins(bins, n_workers=n_workers, verbose=verbose)
