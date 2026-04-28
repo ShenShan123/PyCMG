@@ -567,15 +567,17 @@ def save_npz(
     outputs: np.ndarray,
     output_path: "str | Path",
     metadata: "Optional[Dict[str, object]]" = None,
+    sample_class: "Optional[np.ndarray]" = None,
 ) -> None:
     """Save NN training arrays to a .npz file.
 
     The .npz layout is the contract between pycmg data generation and the
     nn_model training pipeline:
-      inputs   (N, 4)  — source-relative terminal voltages [Vd, Vg, Vs, Vb]
-      geometry (N, 15) — [NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW,
-                           CFS, TOXP, CGSL, UA, EU]
-      outputs  (N, 13) — NN_OUTPUT_COLUMNS order
+      inputs       (N, 4)  — source-relative terminal voltages [Vd, Vg, Vs, Vb]
+      geometry     (N, 15) — [NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW,
+                              CFS, TOXP, CGSL, UA, EU]
+      outputs      (N, 13) — NN_OUTPUT_COLUMNS order
+      sample_class (N,)    — int8 codes (B1; only present when supplied)
 
     Optional metadata keys are saved as ``meta_<key>`` arrays.
 
@@ -585,6 +587,11 @@ def save_npz(
         outputs: (N, 13) float64 array.
         output_path: Destination file path.
         metadata: Optional dict of scalar/array metadata.
+        sample_class: Optional (N,) int8 array tagging each row's origin
+            (anchor / vds_zero / subthresh / small_vds / grid / hot /
+            lhs). Saved as a top-level array so consumers can subset
+            rows for B2 slope loss or B6 universal overlay without
+            reading metadata.
     """
     output_path = str(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -593,6 +600,14 @@ def save_npz(
         "geometry": geometry,
         "outputs": outputs,
     }
+    if sample_class is not None:
+        sc = np.asarray(sample_class)
+        if sc.shape[0] != inputs.shape[0]:
+            raise ValueError(
+                f"sample_class length {sc.shape[0]} != inputs length "
+                f"{inputs.shape[0]}"
+            )
+        save_dict["sample_class"] = sc.astype(np.int8, copy=False)
     if metadata:
         for k, v in metadata.items():
             save_dict[f"meta_{k}"] = np.array(v)

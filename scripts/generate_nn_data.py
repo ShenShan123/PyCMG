@@ -28,8 +28,13 @@ import numpy as np
 
 from pycmg.nn_config import TECH_CONFIGS
 from pycmg.nn_generate import (
+    DEFAULT_GRID_PER_AXIS,
+    DEFAULT_HOT_PER_AXIS,
+    DEFAULT_JITTER_SIGMA_FRAC,
     DEFAULT_LHS_SAMPLES_PER_BIN,
+    DEFAULT_SAMPLER,
     DEFAULT_TEMPERATURES_K,
+    DEFAULT_VBS_LEVELS,
     DEFAULT_VOLTAGE_BOX_FACTOR,
     generate_dataset,
     generate_universal_dataset,
@@ -65,12 +70,17 @@ def _save_finetune_split(
     rng = np.random.default_rng(seed)
     idx = rng.permutation(n_total)[:n]
 
+    sample_class = full.get("sample_class")
+    if sample_class is not None:
+        sample_class = sample_class[idx]
+
     save_npz(
         full["inputs"][idx],
         full["geometry"][idx],
         full["outputs"][idx],
         out_path,
         metadata=full["metadata"],
+        sample_class=sample_class,
     )
     print(f"  Fine-tune split: {n:,} samples -> {out_path}")
 
@@ -97,11 +107,32 @@ def main() -> None:
     # D3
     parser.add_argument("--n-lhs-samples", type=int,
                         default=DEFAULT_LHS_SAMPLES_PER_BIN,
-                        help="LHS samples per (variant, L, NFIN, T) bin")
+                        help="LHS samples per (variant, L, NFIN, T) bin "
+                             "(only used when --sampler=lhs)")
     parser.add_argument("--voltage-box-factor", type=float,
                         default=DEFAULT_VOLTAGE_BOX_FACTOR,
                         help="Voltage box width in units of VDD "
                              "(2.0 = [0, 2]·VDD; covers NR overshoot)")
+
+    # B1 (v5 plan §4): hybrid uniform-grid sampler.
+    parser.add_argument("--sampler", choices=["grid", "lhs"],
+                        default=DEFAULT_SAMPLER,
+                        help="Bulk-sample sampler: 'grid' = hybrid "
+                             "uniform-grid + jitter + hot densification "
+                             "(default, B1); 'lhs' = legacy Latin Hypercube")
+    parser.add_argument("--grid-per-axis", type=int,
+                        default=DEFAULT_GRID_PER_AXIS,
+                        help="[grid] base 2D grid size per axis (Vgs, Vds)")
+    parser.add_argument("--vbs-levels", type=int,
+                        default=DEFAULT_VBS_LEVELS,
+                        help="[grid] number of Vbs levels {0,±0.25,±0.5}·VDD")
+    parser.add_argument("--hot-per-axis", type=int,
+                        default=DEFAULT_HOT_PER_AXIS,
+                        help="[grid] hot-region densification grid size "
+                             "(0 to disable)")
+    parser.add_argument("--jitter-sigma-frac", type=float,
+                        default=DEFAULT_JITTER_SIGMA_FRAC,
+                        help="[grid] Gaussian jitter sigma in fractions of VDD")
 
     # D4
     parser.add_argument("--n-workers", type=int, default=1,
@@ -129,6 +160,11 @@ def main() -> None:
         n_workers=args.n_workers,
         seed=args.seed,
         verbose=True,
+        sampler=args.sampler,
+        grid_per_axis=args.grid_per_axis,
+        vbs_levels=args.vbs_levels,
+        hot_per_axis=args.hot_per_axis,
+        jitter_sigma_frac=args.jitter_sigma_frac,
     )
 
     if args.universal:
@@ -136,7 +172,8 @@ def main() -> None:
             data = generate_universal_dataset(device_type, **common_kw)
             out = data_dir / f"universal_{device_type}.npz"
             save_npz(data["inputs"], data["geometry"], data["outputs"],
-                     out, metadata=data["metadata"])
+                     out, metadata=data["metadata"],
+                     sample_class=data.get("sample_class"))
             if args.finetune_size > 0:
                 ft_out = data_dir / f"finetune_universal_{device_type}.npz"
                 _save_finetune_split(
@@ -158,7 +195,8 @@ def main() -> None:
             )
             out = data_dir / f"{tech.name.lower()}_{device_type}.npz"
             save_npz(data["inputs"], data["geometry"], data["outputs"],
-                     out, metadata=data["metadata"])
+                     out, metadata=data["metadata"],
+                     sample_class=data.get("sample_class"))
             if args.finetune_size > 0:
                 ft_out = data_dir / f"finetune_{tech.name.lower()}_{device_type}.npz"
                 _save_finetune_split(

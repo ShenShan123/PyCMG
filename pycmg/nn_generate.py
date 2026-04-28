@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -43,6 +43,24 @@ from .nn_config import (
     OUTPUT_COLUMNS,
     extract_process_params,
 )
+
+
+# ── Sample-class codes (B1 metadata: tags every row's source) ────────────────
+# Each row in the dataset gets one of these int8 codes so downstream
+# consumers (B2 slope loss, B6 universal overlay) can subset rows by
+# origin without re-running data generation.
+SAMPLE_CLASS_NAMES: Tuple[str, ...] = (
+    "anchor",     # 0  deterministic corner anchors
+    "vds_zero",   # 1  Vds=0 boundary line (for Id(Vds=0)=0 enforcement)
+    "subthresh",  # 2  subthreshold-to-transition region densification
+    "small_vds",  # 3  small |Vds| linear-region densification
+    "grid",       # 4  base hybrid uniform grid + jitter
+    "hot",        # 5  hot-region densification (high-Vgs / high-Vds plateau)
+    "lhs",        # 6  legacy LHS (only used when --sampler=lhs)
+)
+SAMPLE_CLASS_CODES: Dict[str, int] = {
+    name: i for i, name in enumerate(SAMPLE_CLASS_NAMES)
+}
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -66,6 +84,17 @@ DEFAULT_VOLTAGE_BOX_FACTOR: float = 2.0
 # range; doubled for [0, 2]·VDD to keep the same density.
 DEFAULT_LHS_SAMPLES_PER_BIN: int = 5000
 
+# B1 (v5 plan §4-B1): hybrid uniform-grid sampler defaults.
+# Replaces LHS for the bulk of the per-bin samples. The grid is
+# strictly more uniform than LHS in the high-current corner that
+# dominates the verifier metric (D1 finding: hot region holds 3.07 %
+# of LHS samples but 16× the verifier-weighted error mass).
+DEFAULT_GRID_PER_AXIS: int = 30        # 30 × 30 = 900 (Vgs, Vds) points
+DEFAULT_VBS_LEVELS: int = 5            # {0, ±0.25, ±0.5}·VDD
+DEFAULT_HOT_PER_AXIS: int = 12         # 12 × 12 hot-region densification
+DEFAULT_JITTER_SIGMA_FRAC: float = 0.05  # σ = 0.05·VDD on each axis
+DEFAULT_SAMPLER: str = "grid"          # "grid" | "lhs"
+
 
 # ── Bin spec (used by parallel worker) ───────────────────────────────────────
 
@@ -88,6 +117,11 @@ class BinSpec:
     n_lhs_samples: int
     voltage_box_factor: float
     seed: int                 # per-bin RNG seed for LHS reproducibility
+    sampler: str = DEFAULT_SAMPLER  # "grid" | "lhs" (B1)
+    grid_per_axis: int = DEFAULT_GRID_PER_AXIS
+    vbs_levels: int = DEFAULT_VBS_LEVELS
+    hot_per_axis: int = DEFAULT_HOT_PER_AXIS
+    jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC
 
 
 # ── Model + instance with smoke test (D6) ────────────────────────────────────
@@ -208,6 +242,112 @@ def _sample_lhs_voltages(
     return samples
 
 
+def _vbs_levels(vdd: float, n_levels: int) -> np.ndarray:
+    """Return ``n_levels`` symmetric Vbs levels in NMOS-positive convention.
+
+    {0, ±0.25, ±0.5}·VDD, truncated/extended for ``n_levels`` other than 5.
+    The caller mirrors through origin for PMOS via the ``is_pmos`` flag in
+    :func:`_sample_hybrid_grid_voltages`.
+    """
+    base = [0.0, 0.25 * vdd, -0.25 * vdd, 0.5 * vdd, -0.5 * vdd]
+    if n_levels >= len(base):
+        # Pad symmetrically with 0.75/-0.75 if requested.
+        extra = [0.75 * vdd, -0.75 * vdd]
+        full = base + extra
+        return np.array(full[:n_levels], dtype=np.float64)
+    return np.array(base[:n_levels], dtype=np.float64)
+
+
+def _sample_hybrid_grid_voltages(
+    vdd: float,
+    is_pmos: bool,
+    voltage_box_factor: float,
+    seed: int,
+    *,
+    n_grid_per_axis: int = DEFAULT_GRID_PER_AXIS,
+    n_vbs_levels: int = DEFAULT_VBS_LEVELS,
+    n_hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
+    jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Hybrid uniform-grid + jitter sampler with hot-region densification.
+
+    Replaces LHS for the bulk per-bin samples (B1 of the v5 plan).
+
+    Layout:
+
+    - **Base grid** (``n_grid_per_axis × n_grid_per_axis × n_vbs_levels``):
+      Uniform 2D grid in (Vgs, Vds) over ``[0, voltage_box_factor·VDD]``
+      crossed with ``n_vbs_levels`` Vbs levels {0, ±0.25, ±0.5}·VDD,
+      with N(0, ``jitter_sigma_frac``·VDD) Gaussian jitter on each
+      axis. Defaults: 30 × 30 × 5 = 4500 samples.
+
+    - **Hot densification** (``n_hot_per_axis²·n_vbs_levels``):
+      A second uniform grid over the saturation plateau hot region —
+      Vgs ∈ [0.5·VDD, VDD] × Vds ∈ [0.4·VDD, VDD] — at ≈ 1.6× the
+      base grid density (per-bin verifier-weighted hot-region NRMSE
+      lives here; D1 diagnostic). Defaults: 12 × 12 × 5 = 720 samples.
+
+    Per-axis jitter clips back into the box so no negative-coord
+    samples leak. PMOS mirrors the entire (Vgs, Vds, Vbs) point cloud
+    through the origin (source-relative frame).
+
+    Returns:
+        samples: (N, 3) float64 array of (vg, vd, vbs) in NMOS-positive
+                 convention pre-mirror; PMOS rows come back negated.
+        sample_classes: (N,) int8 array with values
+                        ``SAMPLE_CLASS_CODES['grid']`` for the base
+                        grid rows and ``SAMPLE_CLASS_CODES['hot']``
+                        for the hot rows.
+    """
+    rng = np.random.default_rng(seed)
+    box_max_pos = voltage_box_factor * vdd
+    sigma = jitter_sigma_frac * vdd
+    vbs_levels = _vbs_levels(vdd, n_vbs_levels)
+
+    # Base uniform grid over [0, box_max_pos]^2 (Vgs, Vds) × Vbs levels.
+    vg_grid = np.linspace(0.0, box_max_pos, n_grid_per_axis)
+    vd_grid = np.linspace(0.0, box_max_pos, n_grid_per_axis)
+    G, D, B = np.meshgrid(vg_grid, vd_grid, vbs_levels, indexing="ij")
+    base = np.stack([G.ravel(), D.ravel(), B.ravel()], axis=1)
+    base_jit = rng.normal(0.0, sigma, size=base.shape)
+    base = base + base_jit
+    # Clip Vgs, Vds to the [0, box_max_pos] training box; allow Vbs to
+    # exceed its discrete level set (jitter dispersion is desirable
+    # there too) but cap at the same box for safety.
+    base[:, 0] = np.clip(base[:, 0], 0.0, box_max_pos)
+    base[:, 1] = np.clip(base[:, 1], 0.0, box_max_pos)
+    base[:, 2] = np.clip(base[:, 2], -box_max_pos, box_max_pos)
+    base_classes = np.full(base.shape[0],
+                           SAMPLE_CLASS_CODES["grid"], dtype=np.int8)
+
+    # Hot-region densification: doubled grid density on the saturation
+    # plateau (Vgs ∈ [0.5,1]·VDD, Vds ∈ [0.4,1]·VDD).
+    if n_hot_per_axis > 0:
+        vg_hot = np.linspace(0.5 * vdd, vdd, n_hot_per_axis)
+        vd_hot = np.linspace(0.4 * vdd, vdd, n_hot_per_axis)
+        GH, DH, BH = np.meshgrid(vg_hot, vd_hot, vbs_levels, indexing="ij")
+        hot = np.stack([GH.ravel(), DH.ravel(), BH.ravel()], axis=1)
+        # Use a tighter jitter inside the hot region so points stay
+        # inside; sigma half of base.
+        hot_jit = rng.normal(0.0, 0.5 * sigma, size=hot.shape)
+        hot = hot + hot_jit
+        hot[:, 0] = np.clip(hot[:, 0], 0.0, box_max_pos)
+        hot[:, 1] = np.clip(hot[:, 1], 0.0, box_max_pos)
+        hot[:, 2] = np.clip(hot[:, 2], -box_max_pos, box_max_pos)
+        hot_classes = np.full(hot.shape[0],
+                              SAMPLE_CLASS_CODES["hot"], dtype=np.int8)
+        samples = np.concatenate([base, hot], axis=0)
+        classes = np.concatenate([base_classes, hot_classes], axis=0)
+    else:
+        samples = base
+        classes = base_classes
+
+    if is_pmos:
+        samples = -samples
+
+    return samples, classes
+
+
 def _anchor_points(
     vdd: float,
     is_pmos: bool,
@@ -289,6 +429,16 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
 
     Top-level (not nested) so it can be dispatched to a
     multiprocessing.Pool. Returns ``None`` for unstable bins.
+
+    The bulk-sample block is selected by ``spec.sampler``:
+        - ``"grid"`` (default, B1): hybrid uniform grid + jitter + hot
+          densification (``_sample_hybrid_grid_voltages``).
+        - ``"lhs"`` (legacy): Latin Hypercube (``_sample_lhs_voltages``)
+          with ``spec.n_lhs_samples`` points.
+
+    Every kept row is tagged with one of ``SAMPLE_CLASS_CODES`` so
+    downstream loss/data-aug code can subset rows by origin without
+    re-running data generation.
     """
     tech = TECH_CONFIGS[spec.tech_name]
     is_pmos = spec.device_type == "pmos"
@@ -309,49 +459,66 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
     inputs: List[np.ndarray] = []
     geometry: List[np.ndarray] = []
     outputs: List[np.ndarray] = []
+    classes: List[int] = []
     failed = 0
 
-    # Anchor points first (cheap, deterministic).
-    for vg, vd, vbs in _anchor_points(spec.vdd, is_pmos):
-        result = eval_single_point(inst, vd=vd, vg=vg, vs=0.0, vb=vbs)
-        if result is None:
-            failed += 1
-            continue
-        inputs.append(np.array([vd, vg, 0.0, vbs]))
-        geometry.append(geo.copy())
-        outputs.append(np.array([result[k] for k in NN_OUTPUT_COLUMNS]))
-
-    # Dense targeted points: Vds=0 boundary, subthreshold, small Vds.
-    # ~480 extra points per bin to improve circuit-level accuracy.
-    for _gen_fn in (_vds_zero_line_points,
-                    _subthreshold_transition_points,
-                    _small_vds_points):
-        for vg, vd, vbs in _gen_fn(spec.vdd, is_pmos):
-            result = eval_single_point(inst, vd=vd, vg=vg, vs=0.0, vb=vbs)
-            if result is None:
-                failed += 1
-                continue
-            inputs.append(np.array([vd, vg, 0.0, vbs]))
-            geometry.append(geo.copy())
-            outputs.append(np.array([result[k] for k in NN_OUTPUT_COLUMNS]))
-
-    # LHS samples in the wide voltage box.
-    lhs = _sample_lhs_voltages(
-        n_samples=spec.n_lhs_samples,
-        vdd=spec.vdd,
-        is_pmos=is_pmos,
-        voltage_box_factor=spec.voltage_box_factor,
-        seed=spec.seed,
-    )
-    for vg, vd, vbs in lhs:
+    def _eval_and_keep(vg: float, vd: float, vbs: float, klass: int) -> bool:
+        nonlocal failed
         result = eval_single_point(inst, vd=float(vd), vg=float(vg),
                                    vs=0.0, vb=float(vbs))
         if result is None:
             failed += 1
-            continue
+            return False
         inputs.append(np.array([vd, vg, 0.0, vbs]))
         geometry.append(geo.copy())
         outputs.append(np.array([result[k] for k in NN_OUTPUT_COLUMNS]))
+        classes.append(klass)
+        return True
+
+    # Anchor points first (cheap, deterministic).
+    cls_anchor = SAMPLE_CLASS_CODES["anchor"]
+    for vg, vd, vbs in _anchor_points(spec.vdd, is_pmos):
+        _eval_and_keep(vg, vd, vbs, cls_anchor)
+
+    # Dense targeted points: each region has its own sample-class code so
+    # downstream filters can keep / drop them independently.
+    for _gen_fn, _klass in (
+        (_vds_zero_line_points, SAMPLE_CLASS_CODES["vds_zero"]),
+        (_subthreshold_transition_points, SAMPLE_CLASS_CODES["subthresh"]),
+        (_small_vds_points, SAMPLE_CLASS_CODES["small_vds"]),
+    ):
+        for vg, vd, vbs in _gen_fn(spec.vdd, is_pmos):
+            _eval_and_keep(vg, vd, vbs, _klass)
+
+    # Bulk samples — dispatch on sampler.
+    if spec.sampler == "grid":
+        bulk_xyz, bulk_classes = _sample_hybrid_grid_voltages(
+            vdd=spec.vdd,
+            is_pmos=is_pmos,
+            voltage_box_factor=spec.voltage_box_factor,
+            seed=spec.seed,
+            n_grid_per_axis=spec.grid_per_axis,
+            n_vbs_levels=spec.vbs_levels,
+            n_hot_per_axis=spec.hot_per_axis,
+            jitter_sigma_frac=spec.jitter_sigma_frac,
+        )
+        for (vg, vd, vbs), klass in zip(bulk_xyz, bulk_classes):
+            _eval_and_keep(vg, vd, vbs, int(klass))
+    elif spec.sampler == "lhs":
+        lhs = _sample_lhs_voltages(
+            n_samples=spec.n_lhs_samples,
+            vdd=spec.vdd,
+            is_pmos=is_pmos,
+            voltage_box_factor=spec.voltage_box_factor,
+            seed=spec.seed,
+        )
+        cls_lhs = SAMPLE_CLASS_CODES["lhs"]
+        for vg, vd, vbs in lhs:
+            _eval_and_keep(vg, vd, vbs, cls_lhs)
+    else:
+        raise ValueError(
+            f"Unknown sampler {spec.sampler!r} (expected 'grid' or 'lhs')"
+        )
 
     if not inputs:
         return None
@@ -360,6 +527,7 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
         "inputs": np.asarray(inputs, dtype=np.float64),
         "geometry": np.asarray(geometry, dtype=np.float64),
         "outputs": np.asarray(outputs, dtype=np.float64),
+        "sample_class": np.asarray(classes, dtype=np.int8),
         "n_kept": len(inputs),
         "n_failed": failed,
     }
@@ -376,6 +544,11 @@ def enumerate_bins(
     n_lhs_samples: int = DEFAULT_LHS_SAMPLES_PER_BIN,
     voltage_box_factor: float = DEFAULT_VOLTAGE_BOX_FACTOR,
     base_seed: int = 42,
+    sampler: str = DEFAULT_SAMPLER,
+    grid_per_axis: int = DEFAULT_GRID_PER_AXIS,
+    vbs_levels: int = DEFAULT_VBS_LEVELS,
+    hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
+    jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
 ) -> List[BinSpec]:
     """Enumerate every (variant, L, NFIN, T) bin spec for a tech/polarity."""
     variants = variant_names or tech.variant_names
@@ -401,6 +574,11 @@ def enumerate_bins(
                     voltage_box_factor=voltage_box_factor,
                     # Stable per-bin seed: deterministic across runs.
                     seed=base_seed + counter,
+                    sampler=sampler,
+                    grid_per_axis=grid_per_axis,
+                    vbs_levels=vbs_levels,
+                    hot_per_axis=hot_per_axis,
+                    jitter_sigma_frac=jitter_sigma_frac,
                 ))
                 counter += 1
     return bins
@@ -413,7 +591,7 @@ def _assemble(
     metadata: Dict,
     verbose: bool,
 ) -> Dict[str, np.ndarray]:
-    inputs_list, geo_list, out_list = [], [], []
+    inputs_list, geo_list, out_list, cls_list = [], [], [], []
     n_kept_total = 0
     n_failed_total = 0
     n_bins_kept = 0
@@ -429,6 +607,15 @@ def _assemble(
         inputs_list.append(r["inputs"])
         geo_list.append(r["geometry"])
         out_list.append(r["outputs"])
+        # Older bin results (pre-B1) don't carry sample_class; tag them
+        # all as "lhs" so the assembled array still has length N.
+        if "sample_class" in r:
+            cls_list.append(r["sample_class"])
+        else:
+            cls_list.append(
+                np.full(int(r["n_kept"]),
+                        SAMPLE_CLASS_CODES["lhs"], dtype=np.int8)
+            )
 
     if not inputs_list:
         raise RuntimeError(
@@ -439,21 +626,28 @@ def _assemble(
     inputs = np.concatenate(inputs_list, axis=0)
     geometry = np.concatenate(geo_list, axis=0)
     outputs = np.concatenate(out_list, axis=0)
+    sample_class = np.concatenate(cls_list, axis=0).astype(np.int8)
 
     if verbose:
         print(f"\nDataset assembled: "
               f"{n_kept_total:,} kept, {n_failed_total:,} failed, "
               f"{n_bins_kept} bins kept, {n_bins_dropped} bins dropped")
         print(f"Shapes -- inputs: {inputs.shape}, geometry: {geometry.shape}, "
-              f"outputs: {outputs.shape}")
+              f"outputs: {outputs.shape}, sample_class: {sample_class.shape}")
         if geometry.size:
             t_unique = np.unique(geometry[:, 2])
             print(f"Temperatures (K): {t_unique.tolist()}")
+        # Per-class breakdown for visibility.
+        for name, code in SAMPLE_CLASS_CODES.items():
+            n_cls = int(np.sum(sample_class == code))
+            if n_cls:
+                print(f"  sample_class[{name}]={code}: {n_cls:,}")
 
     return {
         "inputs": inputs,
         "geometry": geometry,
         "outputs": outputs,
+        "sample_class": sample_class,
         "metadata": metadata,
     }
 
@@ -515,6 +709,11 @@ def generate_dataset(
     n_workers: int = 1,
     seed: int = 42,
     verbose: bool = True,
+    sampler: str = DEFAULT_SAMPLER,
+    grid_per_axis: int = DEFAULT_GRID_PER_AXIS,
+    vbs_levels: int = DEFAULT_VBS_LEVELS,
+    hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
+    jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
 ) -> Dict[str, np.ndarray]:
     """Generate training data for one tech/polarity across all bins.
 
@@ -543,12 +742,28 @@ def generate_dataset(
         n_lhs_samples=n_lhs_samples,
         voltage_box_factor=voltage_box_factor,
         base_seed=seed,
+        sampler=sampler,
+        grid_per_axis=grid_per_axis,
+        vbs_levels=vbs_levels,
+        hot_per_axis=hot_per_axis,
+        jitter_sigma_frac=jitter_sigma_frac,
     )
 
     if verbose:
-        print(f"\n{tech.name} {device_type}: {len(bins)} bins "
-              f"({len(bins) * n_lhs_samples:,} LHS + ~{len(bins) * 489} targeted) "
-              f"[T sweep {len(temperatures)} pts, box={voltage_box_factor}·VDD]")
+        if sampler == "grid":
+            n_bulk = (grid_per_axis * grid_per_axis * vbs_levels
+                      + hot_per_axis * hot_per_axis * vbs_levels)
+            print(f"\n{tech.name} {device_type}: {len(bins)} bins "
+                  f"(sampler=grid, {len(bins) * n_bulk:,} bulk "
+                  f"+ ~{len(bins) * 489} targeted) "
+                  f"[T sweep {len(temperatures)} pts, "
+                  f"box={voltage_box_factor}·VDD]")
+        else:
+            print(f"\n{tech.name} {device_type}: {len(bins)} bins "
+                  f"(sampler=lhs, {len(bins) * n_lhs_samples:,} LHS "
+                  f"+ ~{len(bins) * 489} targeted) "
+                  f"[T sweep {len(temperatures)} pts, "
+                  f"box={voltage_box_factor}·VDD]")
 
     results = _run_bins(bins, n_workers=n_workers, verbose=verbose)
 
@@ -560,6 +775,12 @@ def generate_dataset(
         "voltage_box_factor": voltage_box_factor,
         "output_columns": np.array(NN_OUTPUT_COLUMNS),
         "variants": np.array(variant_names or tech.variant_names),
+        "sampler": sampler,
+        "grid_per_axis": grid_per_axis,
+        "vbs_levels": vbs_levels,
+        "hot_per_axis": hot_per_axis,
+        "jitter_sigma_frac": jitter_sigma_frac,
+        "sample_class_names": np.array(SAMPLE_CLASS_NAMES),
     }
     return _assemble(results, metadata, verbose=verbose)
 
@@ -573,6 +794,11 @@ def generate_universal_dataset(
     n_workers: int = 1,
     seed: int = 42,
     verbose: bool = True,
+    sampler: str = DEFAULT_SAMPLER,
+    grid_per_axis: int = DEFAULT_GRID_PER_AXIS,
+    vbs_levels: int = DEFAULT_VBS_LEVELS,
+    hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
+    jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
 ) -> Dict[str, np.ndarray]:
     """Concatenate per-tech datasets across all 5 technologies and variants.
 
@@ -592,11 +818,22 @@ def generate_universal_dataset(
             n_lhs_samples=n_lhs_samples,
             voltage_box_factor=voltage_box_factor,
             base_seed=seed + len(all_bins),
+            sampler=sampler,
+            grid_per_axis=grid_per_axis,
+            vbs_levels=vbs_levels,
+            hot_per_axis=hot_per_axis,
+            jitter_sigma_frac=jitter_sigma_frac,
         ))
 
     if verbose:
-        print(f"\nUniversal {device_type}: total {len(all_bins)} bins, "
-              f"~{len(all_bins) * n_lhs_samples:,} expected LHS samples")
+        if sampler == "grid":
+            n_bulk = (grid_per_axis * grid_per_axis * vbs_levels
+                      + hot_per_axis * hot_per_axis * vbs_levels)
+            print(f"\nUniversal {device_type}: total {len(all_bins)} bins, "
+                  f"sampler=grid, ~{len(all_bins) * n_bulk:,} bulk samples")
+        else:
+            print(f"\nUniversal {device_type}: total {len(all_bins)} bins, "
+                  f"sampler=lhs, ~{len(all_bins) * n_lhs_samples:,} LHS samples")
 
     results = _run_bins(all_bins, n_workers=n_workers, verbose=verbose)
 
@@ -608,5 +845,11 @@ def generate_universal_dataset(
         "voltage_box_factor": voltage_box_factor,
         "output_columns": np.array(NN_OUTPUT_COLUMNS),
         "variants": np.array(list(TECH_CONFIGS.keys())),
+        "sampler": sampler,
+        "grid_per_axis": grid_per_axis,
+        "vbs_levels": vbs_levels,
+        "hot_per_axis": hot_per_axis,
+        "jitter_sigma_frac": jitter_sigma_frac,
+        "sample_class_names": np.array(SAMPLE_CLASS_NAMES),
     }
     return _assemble(results, metadata, verbose=verbose)
