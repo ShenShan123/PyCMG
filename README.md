@@ -265,22 +265,60 @@ The analysis evaluates at 4 representative bias points (subthreshold, linear, sa
 For neural network compact model training, PyCMG provides a dedicated `.npz` data generator that:
 - Enumerates **PDK-legal (L, NFIN) bin boundaries** for TSMC techs (or uses a fallback NFIN list for ASAP7)
 - Extracts **process parameters on-the-fly** from the resolved modelcard for each (L, NFIN) bin
-- Sweeps in a **source-relative frame** (Vs=0, Vb=0) with extended voltage range covering NR overshoot
+- Sweeps in a **source-relative frame** (Vs=0) over a `[0, voltage_box_factor·VDD]` box (default 2·VDD; PMOS mirrors through the origin) to cover Newton-Raphson overshoot
 - Writes geometry as 15 columns: `[NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW, CFS, TOXP, CGSL, UA, EU]`
+- Tags every kept row with a `sample_class` int8 code (`anchor / vds_zero / subthresh / small_vds / grid / hot / lhs`) so downstream loss/data-augmentation code can subset rows by origin
+
+Each `(variant, L, NFIN, T)` bin produces:
+
+- **~489 targeted points** — anchors + `Vds=0` boundary line (60) + subthreshold transition (300) + small-`Vds` linear region (120). These enforce `Id(Vds=0)=0`, switching-region accuracy, and linear-region fidelity.
+- **Bulk samples** — selected by `--sampler`:
+  - `grid` (default): hybrid uniform `(grid_per_axis × grid_per_axis × vbs_levels)` grid in `(Vgs, Vds, Vbs)` with `N(0, jitter_sigma_frac·VDD)` Gaussian jitter, plus a `(hot_per_axis × hot_per_axis × vbs_levels)` densification on the saturation plateau (`Vgs ∈ [0.5,1]·VDD`, `Vds ∈ [0.4,1]·VDD`). Defaults give 4500 grid + 720 hot ≈ 5220 bulk samples per bin (~2.3× hot-box density boost vs uniform).
+  - `lhs`: legacy Latin Hypercube (default 5000 samples per bin), retained for ablation.
 
 ```bash
 # Generate universal dataset across all 5 techs and 21 variants
+# (defaults: grid sampler, 30×30×5 base + 12×12×5 hot, T = {-25,27,125}°C, box = 2·VDD)
 python scripts/generate_nn_data.py --device both --universal
 
-# Single technology
+# Single technology / variant subset
 python scripts/generate_nn_data.py --device nmos --tech tsmc7
+python scripts/generate_nn_data.py --device nmos --tech tsmc7 --variants svt,lvt
 
-# Add dense mid-supply sampling for transient accuracy
-python scripts/generate_nn_data.py --device both --universal --n-dense-mid 30
+# Tune the hybrid grid sampler
+python scripts/generate_nn_data.py --device both --universal \
+    --grid-per-axis 40 --hot-per-axis 16 --vbs-levels 5 \
+    --jitter-sigma-frac 0.05
 
-# Custom output directory
-python scripts/generate_nn_data.py --device both --universal --data-dir ./my_data
+# Switch back to legacy LHS for ablation
+python scripts/generate_nn_data.py --device both --universal \
+    --sampler lhs --n-lhs-samples 8000
+
+# Multi-process bin generation + custom temperatures + output dir
+python scripts/generate_nn_data.py --device both --universal \
+    --temperatures 248.15,300.15,398.15 \
+    --n-workers 8 --seed 42 --data-dir ./my_data
+
+# Also write a stratified fine-tune split alongside the main file
+python scripts/generate_nn_data.py --device both --universal --finetune-size 200000
 ```
+
+**CLI flags** (see `scripts/generate_nn_data.py --help` for the full list):
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--sampler {grid,lhs}` | `grid` | Bulk-sample sampler. `grid` = hybrid uniform grid + jitter + hot densification. |
+| `--grid-per-axis N` | 30 | Base 2D grid size per axis (Vgs, Vds). |
+| `--vbs-levels N` | 5 | Number of Vbs levels in `{0, ±0.25, ±0.5}·VDD`. |
+| `--hot-per-axis N` | 12 | Hot-region densification grid size (0 to disable). |
+| `--jitter-sigma-frac F` | 0.05 | Gaussian jitter sigma in fractions of VDD. |
+| `--n-lhs-samples N` | 5000 | LHS samples per bin (only used when `--sampler=lhs`). |
+| `--voltage-box-factor F` | 2.0 | Voltage box width in units of VDD. |
+| `--temperatures K1,K2,...` | -25,27,125 °C | Comma-separated temperatures in Kelvin. |
+| `--n-workers N` | 1 | Parallel worker count (1 = serial). |
+| `--seed N` | 42 | Base RNG seed; per-bin seeds derive monotonically. |
+| `--finetune-size N` | 0 | If >0, also write `finetune_<base>.npz` with a stratified subset. |
+| `--data-dir DIR` | (auto) | Output directory for `.npz` files. |
 
 **Python API:**
 
@@ -289,19 +327,24 @@ from pycmg.nn_generate import generate_dataset, generate_universal_dataset
 from pycmg.nn_config import TECH_CONFIGS
 from pycmg.sweep import save_npz
 
-# Single tech
+# Single tech (defaults: sampler="grid", grid_per_axis=30, hot_per_axis=12, vbs_levels=5)
 data = generate_dataset(TECH_CONFIGS["tsmc7"], "nmos")
-save_npz(data["inputs"], data["geometry"], data["outputs"], "tsmc7_nmos.npz")
+save_npz(data["inputs"], data["geometry"], data["outputs"],
+         "tsmc7_nmos.npz",
+         metadata=data["metadata"], sample_class=data.get("sample_class"))
 
 # Universal (all techs)
 data = generate_universal_dataset("nmos")
-save_npz(data["inputs"], data["geometry"], data["outputs"], "universal_nmos.npz")
+save_npz(data["inputs"], data["geometry"], data["outputs"],
+         "universal_nmos.npz",
+         metadata=data["metadata"], sample_class=data.get("sample_class"))
 ```
 
 **Output format:**
-- `inputs` (N, 4): source-relative terminal voltages `[Vd, Vg, Vs, Vb]`
-- `geometry` (N, 15): `[NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW, CFS, TOXP, CGSL, UA, EU]`
-- `outputs` (N, 13): `[id, gm, gds, gmb, qg, qd, qs, qb, cgg, cgd, cgs, cdg, cdd]`
+- `inputs` (N, 4): source-relative terminal voltages `[Vd, Vg, Vs, Vb]` (NMOS in `[0, 2·VDD]`; PMOS mirrored to `[-2·VDD, 0]`).
+- `geometry` (N, 15): `[NFIN, L, T, PHIG, U0, VSAT, EOT, ETA0, CIT, RDSW, CFS, TOXP, CGSL, UA, EU]`.
+- `outputs` (N, 13): `[id, gm, gds, gmb, qg, qd, qs, qb, cgg, cgd, cgs, cdg, cdd]`.
+- `sample_class` (N,) int8 — origin of each row. Decode via `metadata["sample_class_names"]`.
 
 Process parameters are **per-bin accurate**: for TSMC techs, different (L, NFIN) bins may produce different process param values because the variant overlay differs per bin. This is more accurate than using a single set of process parameters per Vt flavor.
 
@@ -694,9 +737,11 @@ pycmg-wrapper/
 
 ### pycmg.nn_generate
 
-**`generate_dataset(tech, device_type, variant_names, verbose, vg_points, vd_points, dense_ratio, n_dense_mid)`** -- Generate NN training data for one tech/polarity. Iterates PDK-legal (L, NFIN) combos, extracts process params on-the-fly. Returns dict with `inputs` (N,4), `geometry` (N,15), `outputs` (N,13), `metadata`.
+**`generate_dataset(tech, device_type, *, variant_names, temperatures, n_lhs_samples, voltage_box_factor, n_workers, seed, verbose, sampler, grid_per_axis, vbs_levels, hot_per_axis, jitter_sigma_frac)`** -- Generate NN training data for one tech/polarity. Iterates PDK-legal (L, NFIN) combos x temperatures x bins, extracts process params on-the-fly, runs the targeted+bulk sampler chosen by `sampler`. Returns dict with `inputs` (N,4), `geometry` (N,15), `outputs` (N,13), `sample_class` (N,) int8, `metadata`.
 
-**`generate_universal_dataset(device_type, verbose, vg_points, vd_points, dense_ratio, n_dense_mid)`** -- Concatenates `generate_dataset()` across all 5 technologies.
+**`generate_universal_dataset(device_type, *, ...)`** -- Same signature as `generate_dataset` (minus `tech`). Concatenates results across all 5 technologies.
+
+**`SAMPLE_CLASS_NAMES`** -- Tuple of class labels indexed by the `sample_class` int8 codes: `("anchor", "vds_zero", "subthresh", "small_vds", "grid", "hot", "lhs")`.
 
 **`eval_single_point(inst, vd, vg, vs, vb)`** -- Evaluate one DC bias point. Returns dict of 13 outputs or None on failure.
 
