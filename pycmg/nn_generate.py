@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .sweep import NN_OUTPUT_COLUMNS
+from .sweep import NN_OUTPUT_COLUMNS, find_threshold
 from .model import Model, Instance
 from .nn_config import (
     OSDI_PATH,
@@ -57,6 +57,10 @@ SAMPLE_CLASS_NAMES: Tuple[str, ...] = (
     "grid",       # 4  base hybrid uniform grid + jitter
     "hot",        # 5  hot-region densification (high-Vgs / high-Vds plateau)
     "lhs",        # 6  legacy LHS (only used when --sampler=lhs)
+    # v5 plan §4 additions:
+    "inv_trip",   # 7  inverter trip-point overlay (Vth-centered band)
+    "overshoot",  # 8  NR-overshoot densification (|V| > VDD region)
+    "vbs_lhs",    # 9  Vbs LHS jitter on the Vgs/Vds grid
 )
 SAMPLE_CLASS_CODES: Dict[str, int] = {
     name: i for i, name in enumerate(SAMPLE_CLASS_NAMES)
@@ -73,12 +77,13 @@ DEFAULT_TEMPERATURES_K: Tuple[float, ...] = (
 )
 
 # D3: voltage box widening factor. paper uses 1.0 (i.e. [0, 1]·VDD).
-# We default to 2.0 because the BSIMAR model is consumed inside an NR
-# solver at LEVEL=74 and that solver routinely overshoots ±VDD before
-# converging (CLAUDE.md NN Rule #3). [0, 2]·VDD covers one full VDD of
-# overshoot headroom on each side and removes inference-time
-# extrapolation garbage. This is an explicit override of the paper.
-DEFAULT_VOLTAGE_BOX_FACTOR: float = 2.0
+# v5 plan §4-B2: lowered from 2.0 → 1.5 — saves ~25 % rows on the
+# bulk grid. The far-overshoot region [VDD, 1.6·VDD]² is now covered
+# by the dedicated ``overshoot`` sample class (denser there than the
+# old uniform 2·VDD box) and by the Phase A tanh rail-restoring
+# inference glue, so a 1.5·VDD bulk box still leaves ample NR
+# headroom while reducing wasted samples in the far corner.
+DEFAULT_VOLTAGE_BOX_FACTOR: float = 1.5
 
 # D3: per-bin LHS sample budget. paper uses ~5K/bin for the [0, 1]·VDD
 # range; doubled for [0, 2]·VDD to keep the same density.
@@ -94,6 +99,11 @@ DEFAULT_VBS_LEVELS: int = 5            # {0, ±0.25, ±0.5}·VDD
 DEFAULT_HOT_PER_AXIS: int = 12         # 12 × 12 hot-region densification
 DEFAULT_JITTER_SIGMA_FRAC: float = 0.05  # σ = 0.05·VDD on each axis
 DEFAULT_SAMPLER: str = "grid"          # "grid" | "lhs"
+
+# v5 plan §4 additions:
+DEFAULT_INV_TRIP: bool = True          # B1 inv-trip overlay on by default
+DEFAULT_OVERSHOOT_PER_AXIS: int = 20   # B2 20 × 20 = 400 / bin
+DEFAULT_N_VBS_LHS: int = 600           # B3 600 LHS Vbs jitter / bin
 
 
 # ── Bin spec (used by parallel worker) ───────────────────────────────────────
@@ -122,6 +132,10 @@ class BinSpec:
     vbs_levels: int = DEFAULT_VBS_LEVELS
     hot_per_axis: int = DEFAULT_HOT_PER_AXIS
     jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC
+    # v5 plan §4 additions:
+    enable_inv_trip: bool = DEFAULT_INV_TRIP
+    overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS
+    n_vbs_lhs: int = DEFAULT_N_VBS_LHS
 
 
 # ── Model + instance with smoke test (D6) ────────────────────────────────────
@@ -422,6 +436,116 @@ def _small_vds_points(
     return [(float(vg), float(vd), 0.0) for vd in vds_vals for vg in vg_steps]
 
 
+def _inv_trip_points(
+    vth_mag: float,
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """v5 plan §4-B1 inverter trip-point overlay.
+
+    A 25 × 9 × 3 (Vg × Vd × Vbs) grid centred on Vth (signed for the
+    polarity) covering the inverter switching band:
+
+        Vg  in [Vth − 0.10, Vth + 0.15]   (in NMOS-positive convention,
+                                           or Vth in PMOS-negative)
+        Vd  in [0.30·VDD, 0.70·VDD]       (signed)
+        Vbs in {0, +0.25·VDD, -0.25·VDD}  (signed)
+
+    675 samples per bin. Tagged with sample_class="inv_trip".
+    """
+    s = -1.0 if is_pmos else 1.0
+    vth_signed = s * abs(vth_mag)
+    vg_lo = vth_signed - s * 0.10
+    vg_hi = vth_signed + s * 0.15
+    vg_steps = np.linspace(vg_lo, vg_hi, 25)
+    vd_steps = np.linspace(s * 0.30 * vdd, s * 0.70 * vdd, 9)
+    vbs_levels = [0.0, s * 0.25 * vdd, -s * 0.25 * vdd]
+    return [
+        (float(vg), float(vd), float(vbs))
+        for vg in vg_steps
+        for vd in vd_steps
+        for vbs in vbs_levels
+    ]
+
+
+def _sample_overshoot_voltages(
+    vdd: float,
+    is_pmos: bool,
+    *,
+    n_per_axis: int = 20,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """v5 plan §4-B2 NR-overshoot densification.
+
+    Dense uniform grid in ``(Vgs, Vds) ∈ [VDD, 1.6·VDD]^2`` with
+    ``Vbs = 0``. ``n_per_axis × n_per_axis`` samples (default 400).
+    Smooth-joins the in-distribution box with the Phase A tanh
+    rail-restoring inference glue.
+
+    PMOS mirrors through the origin via the standard ``is_pmos`` flag.
+
+    Returns:
+        samples: (N, 3) array of (vg, vd, vbs).
+        classes: (N,) int8 array tagged ``overshoot``.
+    """
+    vg_grid = np.linspace(vdd, 1.6 * vdd, n_per_axis)
+    vd_grid = np.linspace(vdd, 1.6 * vdd, n_per_axis)
+    G, D = np.meshgrid(vg_grid, vd_grid, indexing="ij")
+    samples = np.stack(
+        [G.ravel(), D.ravel(), np.zeros(G.size, dtype=np.float64)], axis=1
+    )
+    if is_pmos:
+        samples = -samples
+    classes = np.full(samples.shape[0],
+                      SAMPLE_CLASS_CODES["overshoot"], dtype=np.int8)
+    return samples, classes
+
+
+def _sample_vbs_lhs_voltages(
+    vdd: float,
+    is_pmos: bool,
+    seed: int,
+    *,
+    n_samples: int = 600,
+    grid_per_axis: int = DEFAULT_GRID_PER_AXIS,
+    voltage_box_factor: float = DEFAULT_VOLTAGE_BOX_FACTOR,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """v5 plan §4-B3 LHS Vbs jitter on the existing (Vgs, Vds) grid.
+
+    Holds (Vgs, Vds) on the same uniform grid as the bulk sampler and
+    jitters ``Vbs ~ U(-0.5·VDD, +0.5·VDD)`` once per (Vg, Vd) point.
+    ``n_samples`` (Vg, Vd) points are drawn uniformly with replacement
+    from the lattice (the grid has ``grid_per_axis^2`` cells). Targets
+    the on-grid Vbs overfit observed in the SML §3.3 TSMC7 NMOS DC
+    L-vs-S inversion.
+
+    Returns:
+        samples: (n_samples, 3) array of (vg, vd, vbs).
+        classes: (n_samples,) int8 array tagged ``vbs_lhs``.
+    """
+    rng = np.random.default_rng(seed)
+    box_max_pos = voltage_box_factor * vdd
+
+    # Uniform random selection from the (Vgs, Vds) lattice.
+    vg_grid = np.linspace(0.0, box_max_pos, grid_per_axis)
+    vd_grid = np.linspace(0.0, box_max_pos, grid_per_axis)
+    vg_idx = rng.integers(0, grid_per_axis, size=n_samples)
+    vd_idx = rng.integers(0, grid_per_axis, size=n_samples)
+    vg = vg_grid[vg_idx]
+    vd = vd_grid[vd_idx]
+
+    # LHS-style stratified Vbs in [-0.5, +0.5]·VDD.
+    from scipy.stats.qmc import LatinHypercube
+    lhs = LatinHypercube(d=1, seed=seed).random(n=n_samples).ravel()
+    vbs = (lhs - 0.5) * vdd  # uniform on [-0.5*VDD, +0.5*VDD]
+
+    samples = np.stack([vg, vd, vbs], axis=1)
+    if is_pmos:
+        samples = -samples
+    classes = np.full(samples.shape[0],
+                      SAMPLE_CLASS_CODES["vbs_lhs"], dtype=np.int8)
+    return samples, classes
+
+
 # ── Per-bin worker (D4 — picklable for multiprocessing) ──────────────────────
 
 def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
@@ -490,6 +614,47 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
         for vg, vd, vbs in _gen_fn(spec.vdd, is_pmos):
             _eval_and_keep(vg, vd, vbs, _klass)
 
+    # v5 plan §4-B1: inverter trip-point overlay. Vth_n / Vth_p is
+    # determined per-bin via the peak-gm coarse sweep (find_threshold)
+    # so the band tracks the actual modelcard variant.
+    if spec.enable_inv_trip:
+        try:
+            vth_mag = find_threshold(inst, spec.vdd,
+                                     device_type=spec.device_type)
+        except Exception as exc:
+            print(f"  WARNING: find_threshold failed for "
+                  f"{spec.tech_name}:{spec.variant} L={spec.L*1e9:.1f}nm "
+                  f"NFIN={spec.NFIN:.0f}: {exc!r}; skipping inv_trip overlay")
+            vth_mag = None
+        if vth_mag is not None:
+            cls_inv = SAMPLE_CLASS_CODES["inv_trip"]
+            for vg, vd, vbs in _inv_trip_points(vth_mag, spec.vdd, is_pmos):
+                _eval_and_keep(vg, vd, vbs, cls_inv)
+
+    # v5 plan §4-B2: NR-overshoot densification — dense grid past the
+    # 1.5·VDD bulk box, in [VDD, 1.6·VDD]^2 with Vbs=0.
+    if spec.overshoot_per_axis > 0:
+        os_xyz, os_classes = _sample_overshoot_voltages(
+            vdd=spec.vdd,
+            is_pmos=is_pmos,
+            n_per_axis=spec.overshoot_per_axis,
+        )
+        for (vg, vd, vbs), klass in zip(os_xyz, os_classes):
+            _eval_and_keep(vg, vd, vbs, int(klass))
+
+    # v5 plan §4-B3: Vbs LHS jitter — 600 LHS samples / bin.
+    if spec.n_vbs_lhs > 0:
+        vl_xyz, vl_classes = _sample_vbs_lhs_voltages(
+            vdd=spec.vdd,
+            is_pmos=is_pmos,
+            seed=spec.seed + 1009,    # decorrelate from bulk grid jitter
+            n_samples=spec.n_vbs_lhs,
+            grid_per_axis=spec.grid_per_axis,
+            voltage_box_factor=spec.voltage_box_factor,
+        )
+        for (vg, vd, vbs), klass in zip(vl_xyz, vl_classes):
+            _eval_and_keep(vg, vd, vbs, int(klass))
+
     # Bulk samples — dispatch on sampler.
     if spec.sampler == "grid":
         bulk_xyz, bulk_classes = _sample_hybrid_grid_voltages(
@@ -549,6 +714,9 @@ def enumerate_bins(
     vbs_levels: int = DEFAULT_VBS_LEVELS,
     hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
     jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
+    enable_inv_trip: bool = DEFAULT_INV_TRIP,
+    overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
+    n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
 ) -> List[BinSpec]:
     """Enumerate every (variant, L, NFIN, T) bin spec for a tech/polarity."""
     variants = variant_names or tech.variant_names
@@ -579,6 +747,9 @@ def enumerate_bins(
                     vbs_levels=vbs_levels,
                     hot_per_axis=hot_per_axis,
                     jitter_sigma_frac=jitter_sigma_frac,
+                    enable_inv_trip=enable_inv_trip,
+                    overshoot_per_axis=overshoot_per_axis,
+                    n_vbs_lhs=n_vbs_lhs,
                 ))
                 counter += 1
     return bins
@@ -714,6 +885,9 @@ def generate_dataset(
     vbs_levels: int = DEFAULT_VBS_LEVELS,
     hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
     jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
+    enable_inv_trip: bool = DEFAULT_INV_TRIP,
+    overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
+    n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
 ) -> Dict[str, np.ndarray]:
     """Generate training data for one tech/polarity across all bins.
 
@@ -747,6 +921,9 @@ def generate_dataset(
         vbs_levels=vbs_levels,
         hot_per_axis=hot_per_axis,
         jitter_sigma_frac=jitter_sigma_frac,
+        enable_inv_trip=enable_inv_trip,
+        overshoot_per_axis=overshoot_per_axis,
+        n_vbs_lhs=n_vbs_lhs,
     )
 
     if verbose:
@@ -781,6 +958,9 @@ def generate_dataset(
         "hot_per_axis": hot_per_axis,
         "jitter_sigma_frac": jitter_sigma_frac,
         "sample_class_names": np.array(SAMPLE_CLASS_NAMES),
+        "enable_inv_trip": np.bool_(enable_inv_trip),
+        "overshoot_per_axis": int(overshoot_per_axis),
+        "n_vbs_lhs": int(n_vbs_lhs),
     }
     return _assemble(results, metadata, verbose=verbose)
 
@@ -799,6 +979,10 @@ def generate_universal_dataset(
     vbs_levels: int = DEFAULT_VBS_LEVELS,
     hot_per_axis: int = DEFAULT_HOT_PER_AXIS,
     jitter_sigma_frac: float = DEFAULT_JITTER_SIGMA_FRAC,
+    enable_inv_trip: bool = DEFAULT_INV_TRIP,
+    overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
+    n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
+    exclude_techs: Optional[Sequence[str]] = None,
 ) -> Dict[str, np.ndarray]:
     """Concatenate per-tech datasets across all 5 technologies and variants.
 
@@ -806,8 +990,13 @@ def generate_universal_dataset(
     through one ``_run_bins`` call so the multiprocessing pool can keep
     every worker busy across tech boundaries.
     """
+    excl = {t.lower() for t in (exclude_techs or [])}
     all_bins: List[BinSpec] = []
     for _name, tech in TECH_CONFIGS.items():
+        if _name.lower() in excl:
+            if verbose:
+                print(f"\n[skip] {tech.name.upper()} excluded by --exclude-techs")
+            continue
         if verbose:
             print(f"\n{'='*60}\n  {tech.name.upper()} -- "
                   f"{len(tech.variant_names)} variants, VDD={tech.vdd}V"
@@ -823,6 +1012,9 @@ def generate_universal_dataset(
             vbs_levels=vbs_levels,
             hot_per_axis=hot_per_axis,
             jitter_sigma_frac=jitter_sigma_frac,
+            enable_inv_trip=enable_inv_trip,
+            overshoot_per_axis=overshoot_per_axis,
+            n_vbs_lhs=n_vbs_lhs,
         ))
 
     if verbose:
@@ -837,6 +1029,7 @@ def generate_universal_dataset(
 
     results = _run_bins(all_bins, n_workers=n_workers, verbose=verbose)
 
+    included_techs = [n for n in TECH_CONFIGS.keys() if n.lower() not in excl]
     metadata = {
         "tech_name": "universal",
         "device_type": device_type,
@@ -844,12 +1037,16 @@ def generate_universal_dataset(
         "temperatures_k": np.array(temperatures, dtype=np.float64),
         "voltage_box_factor": voltage_box_factor,
         "output_columns": np.array(NN_OUTPUT_COLUMNS),
-        "variants": np.array(list(TECH_CONFIGS.keys())),
+        "variants": np.array(included_techs),
         "sampler": sampler,
         "grid_per_axis": grid_per_axis,
         "vbs_levels": vbs_levels,
         "hot_per_axis": hot_per_axis,
         "jitter_sigma_frac": jitter_sigma_frac,
         "sample_class_names": np.array(SAMPLE_CLASS_NAMES),
+        "enable_inv_trip": np.bool_(enable_inv_trip),
+        "overshoot_per_axis": int(overshoot_per_axis),
+        "n_vbs_lhs": int(n_vbs_lhs),
+        "excluded_techs": np.array(sorted(excl)),
     }
     return _assemble(results, metadata, verbose=verbose)
