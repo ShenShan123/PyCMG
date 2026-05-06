@@ -144,6 +144,19 @@ def main() -> None:
                         help="If >0, also write finetune_<base>.npz with a "
                              "stratified random subset of N samples (D8)")
 
+    # v5 plan §4-B5: dataset versioning + tech exclusion.
+    parser.add_argument(
+        "--version", default="",
+        help="Version tag prefixed onto output filenames "
+             "(e.g. 'v5' -> universal_v5_{nmos,pmos}.npz). "
+             "Empty string preserves the legacy unversioned name.",
+    )
+    parser.add_argument(
+        "--exclude-techs", default="",
+        help="Comma-separated tech names to exclude from generation "
+             "(case-insensitive). Common v5 use: --exclude-techs asap7.",
+    )
+
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Output directory for .npz files")
     args = parser.parse_args()
@@ -152,6 +165,23 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     devices = ["nmos", "pmos"] if args.device == "both" else [args.device]
+
+    # v5 plan §4-B5: parse exclude-techs once, validate.
+    exclude_techs = sorted({
+        t.strip().lower() for t in args.exclude_techs.split(",") if t.strip()
+    })
+    for t in exclude_techs:
+        if t not in TECH_CONFIGS:
+            raise SystemExit(
+                f"--exclude-techs: unknown tech {t!r}; "
+                f"valid options: {sorted(TECH_CONFIGS.keys())}"
+            )
+
+    # v5 plan §4-B5: optional version tag. Empty -> legacy name.
+    version_tag = args.version.strip().strip("_")
+
+    def _versioned(stem: str) -> str:
+        return f"{stem}_{version_tag}" if version_tag else stem
 
     common_kw = dict(
         temperatures=args.temperatures,
@@ -169,20 +199,34 @@ def main() -> None:
 
     if args.universal:
         for device_type in devices:
-            data = generate_universal_dataset(device_type, **common_kw)
-            out = data_dir / f"universal_{device_type}.npz"
+            data = generate_universal_dataset(
+                device_type,
+                exclude_techs=exclude_techs,
+                **common_kw,
+            )
+            out = data_dir / f"{_versioned('universal')}_{device_type}.npz"
             save_npz(data["inputs"], data["geometry"], data["outputs"],
                      out, metadata=data["metadata"],
                      sample_class=data.get("sample_class"))
+            print(f"  Wrote {out} ({data['inputs'].shape[0]:,} rows)")
             if args.finetune_size > 0:
-                ft_out = data_dir / f"finetune_universal_{device_type}.npz"
+                ft_out = data_dir / (
+                    f"finetune_{_versioned('universal')}_{device_type}.npz"
+                )
                 _save_finetune_split(
                     data, ft_out, args.finetune_size, seed=args.seed,
                 )
         return
 
-    techs = list(TECH_CONFIGS.values()) if args.tech == "all" \
-        else [TECH_CONFIGS[args.tech]]
+    # Per-tech path: --exclude-techs prunes the explicit list too.
+    if args.tech == "all":
+        techs = [t for n, t in TECH_CONFIGS.items() if n not in exclude_techs]
+    elif args.tech in exclude_techs:
+        raise SystemExit(
+            f"--tech {args.tech} conflicts with --exclude-techs {exclude_techs}"
+        )
+    else:
+        techs = [TECH_CONFIGS[args.tech]]
     variant_names = None if args.variants == "all" \
         else [v.strip() for v in args.variants.split(",")]
 
@@ -193,12 +237,17 @@ def main() -> None:
                 variant_names=variant_names,
                 **common_kw,
             )
-            out = data_dir / f"{tech.name.lower()}_{device_type}.npz"
+            out = data_dir / (
+                f"{_versioned(tech.name.lower())}_{device_type}.npz"
+            )
             save_npz(data["inputs"], data["geometry"], data["outputs"],
                      out, metadata=data["metadata"],
                      sample_class=data.get("sample_class"))
+            print(f"  Wrote {out} ({data['inputs'].shape[0]:,} rows)")
             if args.finetune_size > 0:
-                ft_out = data_dir / f"finetune_{tech.name.lower()}_{device_type}.npz"
+                ft_out = data_dir / (
+                    f"finetune_{_versioned(tech.name.lower())}_{device_type}.npz"
+                )
                 _save_finetune_split(
                     data, ft_out, args.finetune_size, seed=args.seed,
                 )
