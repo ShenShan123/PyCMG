@@ -157,6 +157,15 @@ def main() -> None:
              "(case-insensitive). Common v5 use: --exclude-techs asap7.",
     )
 
+    # v5p (V5'): inv_trip overlay is now opt-in. Default off matches the
+    # V4 B1 base sampler. When set, nn_generate.py additionally gates
+    # the overlay to TSMC5 only.
+    parser.add_argument(
+        "--enable-inv-trip", action="store_true", default=False,
+        help="Enable v5 plan §4-B1 inverter-trip overlay. In V5' this "
+             "is additionally gated to TSMC5 only inside nn_generate.py.",
+    )
+
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Output directory for .npz files")
     args = parser.parse_args()
@@ -195,6 +204,7 @@ def main() -> None:
         vbs_levels=args.vbs_levels,
         hot_per_axis=args.hot_per_axis,
         jitter_sigma_frac=args.jitter_sigma_frac,
+        enable_inv_trip=args.enable_inv_trip,
     )
 
     if args.universal:

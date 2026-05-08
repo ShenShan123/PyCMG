@@ -77,13 +77,12 @@ DEFAULT_TEMPERATURES_K: Tuple[float, ...] = (
 )
 
 # D3: voltage box widening factor. paper uses 1.0 (i.e. [0, 1]·VDD).
-# v5 plan §4-B2: lowered from 2.0 → 1.5 — saves ~25 % rows on the
-# bulk grid. The far-overshoot region [VDD, 1.6·VDD]² is now covered
-# by the dedicated ``overshoot`` sample class (denser there than the
-# old uniform 2·VDD box) and by the Phase A tanh rail-restoring
-# inference glue, so a 1.5·VDD bulk box still leaves ample NR
-# headroom while reducing wasted samples in the far corner.
-DEFAULT_VOLTAGE_BOX_FACTOR: float = 1.5
+# v5p (V5'): revert B2 box-factor change. Restore V4 B1 default 2.0.
+# Phase A+B evidence (results/v5_v4_vs_phaseA_vs_phaseAB_2026_05_08.md)
+# showed B2's 1.5 box + overshoot overlay regressed TSMC7/12/16 to
+# NR-runaway 10^12 V. Reverting to V4 B1 box; the ``overshoot`` sample
+# class is also disabled below (DEFAULT_OVERSHOOT_PER_AXIS=0).
+DEFAULT_VOLTAGE_BOX_FACTOR: float = 2.0
 
 # D3: per-bin LHS sample budget. paper uses ~5K/bin for the [0, 1]·VDD
 # range; doubled for [0, 2]·VDD to keep the same density.
@@ -100,10 +99,12 @@ DEFAULT_HOT_PER_AXIS: int = 12         # 12 × 12 hot-region densification
 DEFAULT_JITTER_SIGMA_FRAC: float = 0.05  # σ = 0.05·VDD on each axis
 DEFAULT_SAMPLER: str = "grid"          # "grid" | "lhs"
 
-# v5 plan §4 additions:
-DEFAULT_INV_TRIP: bool = True          # B1 inv-trip overlay on by default
-DEFAULT_OVERSHOOT_PER_AXIS: int = 20   # B2 20 × 20 = 400 / bin
-DEFAULT_N_VBS_LHS: int = 600           # B3 600 LHS Vbs jitter / bin
+# v5p (V5'): all three Phase B overlays default off. inv_trip is
+# turned back on per-bin for TSMC5 only via the gate inside
+# generate_one_bin; B2 (overshoot) and B3 (vbs_lhs) stay off.
+DEFAULT_INV_TRIP: bool = False
+DEFAULT_OVERSHOOT_PER_AXIS: int = 0    # B2 off (caused TSMC7/12/16 regression)
+DEFAULT_N_VBS_LHS: int = 0             # B3 off (caused TSMC7/12/16 regression)
 
 
 # ── Bin spec (used by parallel worker) ───────────────────────────────────────
@@ -617,7 +618,9 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
     # v5 plan §4-B1: inverter trip-point overlay. Vth_n / Vth_p is
     # determined per-bin via the peak-gm coarse sweep (find_threshold)
     # so the band tracks the actual modelcard variant.
-    if spec.enable_inv_trip:
+    # v5p (V5'): gated to TSMC5 only — the single tech where the overlay
+    # had proven leverage (DN inv-tran 16.90 % → 0.92 % PASS).
+    if spec.enable_inv_trip and spec.tech_name == "tsmc5":
         try:
             vth_mag = find_threshold(inst, spec.vdd,
                                      device_type=spec.device_type)
