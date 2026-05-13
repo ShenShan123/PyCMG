@@ -618,9 +618,12 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
     # v5 plan §4-B1: inverter trip-point overlay. Vth_n / Vth_p is
     # determined per-bin via the peak-gm coarse sweep (find_threshold)
     # so the band tracks the actual modelcard variant.
-    # v5p (V5'): gated to TSMC5 only — the single tech where the overlay
-    # had proven leverage (DN inv-tran 16.90 % → 0.92 % PASS).
-    if spec.enable_inv_trip and spec.tech_name == "tsmc5":
+    # V6 (2026-05-13): gate widened to TSMC7 too. Per-tech DirectNet
+    # medium retrain on TSMC7 hit the inverter post-startup transient
+    # gate (-1.05 pp) only, so we re-include TSMC7 in the inv_trip
+    # overlay — same lever that took TSMC5 DN inv-tran from 16.90 % to
+    # 0.92 % PASS in V5'.
+    if spec.enable_inv_trip and spec.tech_name in ("tsmc5", "tsmc7"):
         try:
             vth_mag = find_threshold(inst, spec.vdd,
                                      device_type=spec.device_type)
