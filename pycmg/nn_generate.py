@@ -61,6 +61,11 @@ SAMPLE_CLASS_NAMES: Tuple[str, ...] = (
     "inv_trip",   # 7  inverter trip-point overlay (Vth-centered band)
     "overshoot",  # 8  NR-overshoot densification (|V| > VDD region)
     "vbs_lhs",    # 9  Vbs LHS jitter on the Vgs/Vds grid
+    # V6.3 addition:
+    "reverse_vds",# 10 reverse-Vds corridor (Vd<0 NMOS-frame; Vd>0 PMOS-frame)
+                  #    teaches the NN reverse conduction so the inference-time
+                  #    f_id=0 clamp is no longer load-bearing for inverter
+                  #    transient ringing past the rails.
 )
 SAMPLE_CLASS_CODES: Dict[str, int] = {
     name: i for i, name in enumerate(SAMPLE_CLASS_NAMES)
@@ -442,24 +447,77 @@ def _inv_trip_points(
     vdd: float,
     is_pmos: bool,
 ) -> List[Tuple[float, float, float]]:
-    """v5 plan §4-B1 inverter trip-point overlay.
+    """V6.3.1 inverter trip-point overlay (Vbs=0 only).
 
-    A 25 × 9 × 3 (Vg × Vd × Vbs) grid centred on Vth (signed for the
-    polarity) covering the inverter switching band:
+    Pre-V6.3 the overlay centered Vg on the transistor's peak-gm Vth
+    (via find_threshold). Audit on 2026-05-14 found this misses the
+    inverter's switching band: TSMC12/16 had zero overlay samples at
+    Vg < 0.48 V even though the inverter trips at ~0.40 V, and TSMC5
+    had only 0.24 % of overlay rows in ±33 mV of Vtrip. V6.3 recenters
+    Vg on VDD/2 (the inverter Vtrip for β≈1) and widens the band.
 
-        Vg  in [Vth − 0.10, Vth + 0.15]   (in NMOS-positive convention,
-                                           or Vth in PMOS-negative)
-        Vd  in [0.30·VDD, 0.70·VDD]       (signed)
-        Vbs in {0, +0.25·VDD, -0.25·VDD}  (signed)
+    V6.3.1 — TSMC7/12/16 VTC regressed (+87/+24/+20 mV worst-case) on
+    V6.3 because the 25 × 9 × 3 overlay over-weighted the trip region
+    and the NN over-fit a steeper Id-Vg slope than BSIM-CMG. The
+    inverter operates at Vbs=0 always, so the ±0.25·VDD Vbs samples
+    are body-bias data the inverter never sees; the `grid` class
+    already covers Vbs variation across the entire dataset. Dropping
+    them cuts the overlay from 9.83 % → ~3.3 % of total rows, matching
+    V6.2.1 effective weight while keeping V6.3's VDD/2 centering.
 
-    675 samples per bin. Tagged with sample_class="inv_trip".
+    A 25 × 9 × 1 (Vg × Vd × Vbs) grid covering the inverter switching
+    band:
+
+        Vg  in [0.30·VDD, 0.70·VDD]  (signed by polarity)
+        Vd  in [0.30·VDD, 0.70·VDD]  (signed)
+        Vbs = 0                       (inverter-relevant only)
+
+    225 samples per bin. Tagged with sample_class="inv_trip".
+
+    ``vth_mag`` is retained for back-compat with the caller signature
+    but no longer used.
+    """
+    _ = vth_mag  # kept for back-compat; V6.3+ ignores transistor Vth
+    s = -1.0 if is_pmos else 1.0
+    vg_steps = np.linspace(s * 0.30 * vdd, s * 0.70 * vdd, 25)
+    vd_steps = np.linspace(s * 0.30 * vdd, s * 0.70 * vdd, 9)
+    return [
+        (float(vg), float(vd), 0.0)
+        for vg in vg_steps
+        for vd in vd_steps
+    ]
+
+
+def _reverse_vds_points(
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """V6.3 reverse-Vds corridor: teaches the NN reverse conduction.
+
+    Without these samples the NN's reverse-Vds Id is undefined, so
+    ``mosfet_nn._apply_vds_correction`` hard-clamps it to zero via
+    ``f_id = f_sym if normal_dir else 0.0``. The clamp leaves the load
+    cap with no NMOS restoring current after the inverter rings past
+    GND (or PMOS restoring current past VDD), producing the V6.2.1
+    ~100 mV transient undershoots on TSMC12/16.
+
+    8 × 20 × 3 (Vd × Vg × Vbs) grid in the reverse-Vds quadrant. NMOS:
+    Vd ∈ [-0.30·VDD, -0.01·VDD] with Vg ∈ [0, VDD]. PMOS mirrors
+    through the origin so Vd > 0 and Vg < 0 in the source-relative
+    frame (the PMOS reverse-bias quadrant).
+
+    480 samples per bin. Tagged with sample_class="reverse_vds".
     """
     s = -1.0 if is_pmos else 1.0
-    vth_signed = s * abs(vth_mag)
-    vg_lo = vth_signed - s * 0.10
-    vg_hi = vth_signed + s * 0.15
-    vg_steps = np.linspace(vg_lo, vg_hi, 25)
-    vd_steps = np.linspace(s * 0.30 * vdd, s * 0.70 * vdd, 9)
+    # Vd magnitudes (NMOS-positive convention before the polarity flip).
+    # Tighter spacing near 0 where the linear-region slope matters most
+    # for transient ringing recovery.
+    vd_mags = [0.01, 0.03, 0.06, 0.10, 0.15, 0.20, 0.25, 0.30]
+    # NMOS reverse: Vd negative (i.e. -m·vdd for NMOS, +m·vdd for PMOS).
+    vd_steps = [-s * m * vdd for m in vd_mags]
+    # Full Vg range covering subthreshold through strong inversion so
+    # the NN learns reverse conduction whenever the device is on.
+    vg_steps = np.linspace(0.0, s * vdd, 20)
     vbs_levels = [0.0, s * 0.25 * vdd, -s * 0.25 * vdd]
     return [
         (float(vg), float(vd), float(vbs))
@@ -607,10 +665,14 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
 
     # Dense targeted points: each region has its own sample-class code so
     # downstream filters can keep / drop them independently.
+    # V6.3 adds the reverse_vds corridor (Vd<0 NMOS frame; mirror for PMOS)
+    # so the NN learns reverse conduction instead of relying on the
+    # mosfet_nn.py f_id=0 reverse clamp.
     for _gen_fn, _klass in (
         (_vds_zero_line_points, SAMPLE_CLASS_CODES["vds_zero"]),
         (_subthreshold_transition_points, SAMPLE_CLASS_CODES["subthresh"]),
         (_small_vds_points, SAMPLE_CLASS_CODES["small_vds"]),
+        (_reverse_vds_points, SAMPLE_CLASS_CODES["reverse_vds"]),
     ):
         for vg, vd, vbs in _gen_fn(spec.vdd, is_pmos):
             _eval_and_keep(vg, vd, vbs, _klass)
@@ -623,7 +685,12 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
     # gate (-1.05 pp) only, so we re-include TSMC7 in the inv_trip
     # overlay — same lever that took TSMC5 DN inv-tran from 16.90 % to
     # 0.92 % PASS in V5'.
-    if spec.enable_inv_trip and spec.tech_name in ("tsmc5", "tsmc7"):
+    # V6.2.1 (2026-05-13): extended to TSMC12/16 for the per-tech retrain.
+    # Overlay is VDD-relative (Vd ∈ [0.30·VDD, 0.70·VDD]), Vth tracked
+    # per-bin via find_threshold — safe at the TSMC12/16 vdd_train=0.80 V.
+    if spec.enable_inv_trip and spec.tech_name in (
+        "tsmc5", "tsmc7", "tsmc12", "tsmc16"
+    ):
         try:
             vth_mag = find_threshold(inst, spec.vdd,
                                      device_type=spec.device_type)
