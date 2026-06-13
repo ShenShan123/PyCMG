@@ -898,6 +898,13 @@ def enumerate_bins(
     counter = 0
     for variant in variants:
         for L, NFIN in tech.get_geometry_combos(device_type, variant):
+            # V6.4.7 S9b: exclude NFIN<2. Project CLAUDE.md NN Rule 9 fixes the
+            # data-generation NFIN range to [2,3,5,10,15,20,24] — NFIN=1 causes
+            # OSDI convergence failures / degenerate modelcard resolution for
+            # several TSMC variants (id≈40 kA / mostly-zero process params), and
+            # the tech-variant labeller cannot fingerprint those rows.
+            if float(NFIN) < 2.0:
+                continue
             for T in temperatures:
                 bins.append(BinSpec(
                     tech_name=tech.name.lower(),

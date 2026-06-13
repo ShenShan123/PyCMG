@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -435,12 +436,22 @@ def generate_naive_tsmc_modelcard(
     # Determine which variant was selected (needed for header comment only)
     variant_num = _find_length_variant(pdk_path, base_name, L, NFIN)
 
-    # Write naive modelcard (PROCESS PARAMETERS ONLY)
+    # Write naive modelcard (PROCESS PARAMETERS ONLY).
+    #
+    # ATOMIC WRITE (V6.4.7 S9b fix): the on-the-fly cache file for a given
+    # (pdk_device, L, NFIN) is shared by all three temperature bins (cards are
+    # T-independent), so parallel data-generation workers race on it. A plain
+    # truncate+write let a reader — another worker's Model() parse — see a
+    # partial card, producing a DEGENERATE modelcard (only PHIG/TOXP non-zero,
+    # the rest defaulted to 0) and physically-wrong training rows. Write to a
+    # per-process temp file then os.replace() (atomic rename on the same
+    # filesystem), so a reader only ever observes a complete card.
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = output_file.with_name(f"{output_file.name}.tmp.{os.getpid()}")
 
     nfin_str = f" NFIN={NFIN:.0f}" if NFIN is not None else ""
-    with open(output_file, "w") as f:
+    with open(tmp_file, "w") as f:
         # Header
         f.write(f"* Naive {tech} {device_type} modelcard for L={L*1e9:.1f}nm{nfin_str}\n")
         f.write(f"* Generated from: {pdk_path}\n")
@@ -485,6 +496,10 @@ def generate_naive_tsmc_modelcard(
         f.write(f"* Total parameters: {param_count}\n")
         if skipped_sentinels:
             f.write(f"* Skipped sentinel values: {', '.join(skipped_sentinels)}\n")
+
+    # Atomic publish: a reader either sees no file (and generates its own) or
+    # the fully-written card — never a truncated one.
+    os.replace(tmp_file, output_file)
 
 
 # ---------------------------------------------------------------------------
