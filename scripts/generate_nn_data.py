@@ -19,6 +19,7 @@ Output goes to --data-dir (default: ../../bsimar/data/datasets/).
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -166,9 +167,34 @@ def main() -> None:
              "is additionally gated to TSMC5 only inside nn_generate.py.",
     )
 
+    # V6.4.7 S9b: subthreshold/OFF densification + DC-solve floor fix.
+    parser.add_argument(
+        "--enable-subvt-off", action="store_true", default=False,
+        help="Enable the V6.4.7 S9b subthreshold/OFF |id|-space band probe "
+             "(sample_class='subvt_off'). Fills the 1e-12..1e-6 A id decades "
+             "for the decade-occupancy acceptance gate. Requires the "
+             "DC-solve floor fix (see --dc-solve-tol).",
+    )
+    parser.add_argument(
+        "--dc-solve-tol", type=float, default=1e-12,
+        help="OSDI internal-node NR tolerance for generated rows, exported "
+             "as NN_DC_SOLVE_TOL (default 1e-12). The legacy 1e-9 default "
+             "returned EXACT 0 for true |id|<~1e-9 A (the 6-8%% zero-row "
+             "artifact); 1e-12 resolves the sub-nA band. 1e-14 is FP-limited.",
+    )
+
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Output directory for .npz files")
     args = parser.parse_args()
+
+    # V6.4.7 S9b generator floor fix: export the tightened internal-node NR
+    # tolerance so every generated row (including multiprocessing workers,
+    # which inherit the parent environment at spawn) resolves sub-nA |id|
+    # instead of returning EXACT 0. Instance.eval_dc's own default is
+    # unchanged when this env var is absent.
+    os.environ["NN_DC_SOLVE_TOL"] = repr(float(args.dc_solve_tol))
+    print(f"[gen] NN_DC_SOLVE_TOL={os.environ['NN_DC_SOLVE_TOL']} "
+          f"(DC internal-node NR floor)")
 
     data_dir = args.data_dir or _default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +231,7 @@ def main() -> None:
         hot_per_axis=args.hot_per_axis,
         jitter_sigma_frac=args.jitter_sigma_frac,
         enable_inv_trip=args.enable_inv_trip,
+        enable_subvt_off=args.enable_subvt_off,
     )
 
     if args.universal:

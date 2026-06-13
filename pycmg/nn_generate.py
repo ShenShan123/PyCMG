@@ -66,6 +66,13 @@ SAMPLE_CLASS_NAMES: Tuple[str, ...] = (
                   #    teaches the NN reverse conduction so the inference-time
                   #    f_id=0 clamp is no longer load-bearing for inverter
                   #    transient ringing past the rails.
+    # V6.4.7 S9b addition:
+    "subvt_off",  # 11 subthreshold/OFF |id|-space band probe. Per-bin Vg
+                  #    sweep placed in |id|-space (NOT Vth-centered — peak-gm
+                  #    VTH≈0.97·VDD sits in strong inversion) to fill the
+                  #    1e-12..1e-6 A decades the generator otherwise leaves
+                  #    empty; 5 Vds × 3 Vbs per probed Vg. Requires the
+                  #    NN_DC_SOLVE_TOL=1e-12 floor fix (else sub-nA → exact 0).
 )
 SAMPLE_CLASS_CODES: Dict[str, int] = {
     name: i for i, name in enumerate(SAMPLE_CLASS_NAMES)
@@ -111,6 +118,14 @@ DEFAULT_INV_TRIP: bool = False
 DEFAULT_OVERSHOOT_PER_AXIS: int = 0    # B2 off (caused TSMC7/12/16 regression)
 DEFAULT_N_VBS_LHS: int = 0             # B3 off (caused TSMC7/12/16 regression)
 
+# V6.4.7 S9b: subthreshold/OFF densification overlay (opt-in, off by default
+# so legacy unversioned regen is byte-stable).
+DEFAULT_SUBVT_OFF: bool = False
+SUBVT_OFF_ID_LO: float = 1e-13         # probe just below the gate floor (1e-12)
+SUBVT_OFF_ID_HI: float = 1e-6          # top of the densified band
+SUBVT_OFF_N_VG: int = 30               # Vg samples across the |id| band
+SUBVT_OFF_N_SCAN: int = 160            # coarse Vg probe resolution
+
 
 # ── Bin spec (used by parallel worker) ───────────────────────────────────────
 
@@ -142,6 +157,8 @@ class BinSpec:
     enable_inv_trip: bool = DEFAULT_INV_TRIP
     overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS
     n_vbs_lhs: int = DEFAULT_N_VBS_LHS
+    # V6.4.7 S9b addition:
+    enable_subvt_off: bool = DEFAULT_SUBVT_OFF
 
 
 # ── Model + instance with smoke test (D6) ────────────────────────────────────
@@ -527,6 +544,75 @@ def _reverse_vds_points(
     ]
 
 
+def _subvt_off_points(
+    inst: Instance,
+    vdd: float,
+    is_pmos: bool,
+) -> List[Tuple[float, float, float]]:
+    """V6.4.7 S9b subthreshold/OFF |id|-space band probe (instance-aware).
+
+    The generator's bulk grid + targeted classes leave the deep-subthreshold
+    decades (1e-12..1e-9 A) nearly empty: in Vg-space the OFF→weak-inversion
+    transition is a razor-thin band whose location is variant/geometry
+    dependent. find_threshold centering is unusable here — peak-gm VTH sits
+    at ≈0.97·VDD, deep in strong inversion. Instead we probe in |id|-space:
+
+      1. Coarse Vg scan at the reference bias (Vd=VDD, Vbs=0), mapping the
+         monotone |id|(Vg) envelope.
+      2. Locate the |Vg| window where |id| sweeps [SUBVT_OFF_ID_LO,
+         SUBVT_OFF_ID_HI] = [1e-13, 1e-6] A.
+      3. Return a dense Vg grid over that window crossed with 5 Vds × 3 Vbs.
+
+    High-leakage bins whose |id| never drops below SUBVT_OFF_ID_HI even at
+    Vg=0 (ulvt/elvt at large NFIN — genuine µA–mA leakage) yield no points
+    and are correctly skipped: their OFF state is simply not subthreshold.
+
+    Caller MUST run with NN_DC_SOLVE_TOL=1e-12 (the floor fix); at the legacy
+    1e-9 tolerance the sub-nA |id| comes back as exact 0 and the probe
+    degenerates. Tagged with sample_class="subvt_off".
+    """
+    s = -1.0 if is_pmos else 1.0
+    vd_ref = s * vdd
+    mags = np.linspace(0.0, 0.6 * vdd, SUBVT_OFF_N_SCAN)
+    aid = np.full(mags.shape, np.nan)
+    for i, m in enumerate(mags):
+        r = eval_single_point(inst, vd=float(vd_ref), vg=float(s * m),
+                              vs=0.0, vb=0.0, _silent=True)
+        if r is not None and math.isfinite(r["id"]):
+            aid[i] = abs(r["id"])
+
+    finite = np.isfinite(aid) & (aid > 0.0)
+    if int(finite.sum()) < 4:
+        return []
+    # High-leakage bin: never reaches sub-µA — its OFF state is not
+    # subthreshold, so there is nothing to densify here.
+    if float(np.nanmin(aid[finite])) > SUBVT_OFF_ID_HI:
+        return []
+
+    def _first_mag_at(level: float) -> Optional[float]:
+        idx = np.where(finite & (aid >= level))[0]
+        return float(mags[idx[0]]) if idx.size else None
+
+    mag_lo = _first_mag_at(SUBVT_OFF_ID_LO)
+    mag_hi = _first_mag_at(SUBVT_OFF_ID_HI)
+    if mag_lo is None:
+        mag_lo = 0.0
+    if mag_hi is None:
+        mag_hi = 0.6 * vdd
+    if mag_hi <= mag_lo:
+        return []
+
+    vg_band = np.linspace(mag_lo, mag_hi, SUBVT_OFF_N_VG)
+    vds_fracs = (0.05, 0.25, 0.5, 0.75, 1.0)          # 5 Vds levels
+    vbs_fracs = (0.0, 0.25, -0.25)                    # 3 Vbs levels (signed)
+    return [
+        (float(s * mg), float(s * vf * vdd), float(s * bf * vdd))
+        for mg in vg_band
+        for vf in vds_fracs
+        for bf in vbs_fracs
+    ]
+
+
 def _sample_overshoot_voltages(
     vdd: float,
     is_pmos: bool,
@@ -704,6 +790,15 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
             for vg, vd, vbs in _inv_trip_points(vth_mag, spec.vdd, is_pmos):
                 _eval_and_keep(vg, vd, vbs, cls_inv)
 
+    # V6.4.7 S9b: subthreshold/OFF |id|-space band probe. Fills the
+    # 1e-12..1e-6 A id decades that the bulk grid + targeted classes leave
+    # empty (the decade-occupancy acceptance gate). Instance-aware: the
+    # probe scans |id|(Vg) per-bin, so high-leakage bins self-skip.
+    if spec.enable_subvt_off:
+        cls_sub = SAMPLE_CLASS_CODES["subvt_off"]
+        for vg, vd, vbs in _subvt_off_points(inst, spec.vdd, is_pmos):
+            _eval_and_keep(vg, vd, vbs, cls_sub)
+
     # v5 plan §4-B2: NR-overshoot densification — dense grid past the
     # 1.5·VDD bulk box, in [VDD, 1.6·VDD]^2 with Vbs=0.
     if spec.overshoot_per_axis > 0:
@@ -790,6 +885,7 @@ def enumerate_bins(
     enable_inv_trip: bool = DEFAULT_INV_TRIP,
     overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
     n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
+    enable_subvt_off: bool = DEFAULT_SUBVT_OFF,
 ) -> List[BinSpec]:
     """Enumerate every (variant, L, NFIN, T) bin spec for a tech/polarity."""
     variants = variant_names or tech.variant_names
@@ -823,6 +919,7 @@ def enumerate_bins(
                     enable_inv_trip=enable_inv_trip,
                     overshoot_per_axis=overshoot_per_axis,
                     n_vbs_lhs=n_vbs_lhs,
+                    enable_subvt_off=enable_subvt_off,
                 ))
                 counter += 1
     return bins
@@ -961,6 +1058,7 @@ def generate_dataset(
     enable_inv_trip: bool = DEFAULT_INV_TRIP,
     overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
     n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
+    enable_subvt_off: bool = DEFAULT_SUBVT_OFF,
 ) -> Dict[str, np.ndarray]:
     """Generate training data for one tech/polarity across all bins.
 
@@ -997,6 +1095,7 @@ def generate_dataset(
         enable_inv_trip=enable_inv_trip,
         overshoot_per_axis=overshoot_per_axis,
         n_vbs_lhs=n_vbs_lhs,
+        enable_subvt_off=enable_subvt_off,
     )
 
     if verbose:
@@ -1034,6 +1133,7 @@ def generate_dataset(
         "enable_inv_trip": np.bool_(enable_inv_trip),
         "overshoot_per_axis": int(overshoot_per_axis),
         "n_vbs_lhs": int(n_vbs_lhs),
+        "enable_subvt_off": np.bool_(enable_subvt_off),
     }
     return _assemble(results, metadata, verbose=verbose)
 
@@ -1055,6 +1155,7 @@ def generate_universal_dataset(
     enable_inv_trip: bool = DEFAULT_INV_TRIP,
     overshoot_per_axis: int = DEFAULT_OVERSHOOT_PER_AXIS,
     n_vbs_lhs: int = DEFAULT_N_VBS_LHS,
+    enable_subvt_off: bool = DEFAULT_SUBVT_OFF,
     exclude_techs: Optional[Sequence[str]] = None,
 ) -> Dict[str, np.ndarray]:
     """Concatenate per-tech datasets across all 5 technologies and variants.
@@ -1088,6 +1189,7 @@ def generate_universal_dataset(
             enable_inv_trip=enable_inv_trip,
             overshoot_per_axis=overshoot_per_axis,
             n_vbs_lhs=n_vbs_lhs,
+            enable_subvt_off=enable_subvt_off,
         ))
 
     if verbose:
@@ -1120,6 +1222,7 @@ def generate_universal_dataset(
         "enable_inv_trip": np.bool_(enable_inv_trip),
         "overshoot_per_axis": int(overshoot_per_axis),
         "n_vbs_lhs": int(n_vbs_lhs),
+        "enable_subvt_off": np.bool_(enable_subvt_off),
         "excluded_techs": np.array(sorted(excl)),
     }
     return _assemble(results, metadata, verbose=verbose)
