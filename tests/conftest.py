@@ -6,7 +6,7 @@ The registry provides deterministic modelcard selection:
 - TSMC: on-the-fly generation via ``pycmg.tech.resolve_modelcard``
 
 Tiered registry:
-- TECHNOLOGIES / TECH_NAMES: Original 5 entries (backward-compatible)
+- TECHNOLOGIES / TECH_NAMES: Original 5 entries + TSMC6 (backward-compatible)
 - CORE_VT_VARIANTS / CORE_VT_NAMES: Additional core-voltage Vt flavors
 - ALL_TECHNOLOGIES / ALL_TECH_NAMES: Union of all
 
@@ -129,6 +129,13 @@ TECHNOLOGIES: Dict[str, Dict[str, Any]] = {
         "nmos_params": _make_tsmc_params(is_pmos=False, tech_name="TSMC5"),
         "pmos_params": _make_tsmc_params(is_pmos=True, tech_name="TSMC5"),
     },
+    "TSMC6": {
+        "tech": "TSMC6", "vdd": TECH_REGISTRY["TSMC6"].vdd,
+        "nmos_model": "nch_svt_mac", "pmos_model": "pch_lvt_mac",
+        "nmos_device": "nmos_svt", "pmos_device": "pmos_lvt",
+        "nmos_params": _make_tsmc_params(is_pmos=False, tech_name="TSMC6"),
+        "pmos_params": _make_tsmc_params(is_pmos=True, tech_name="TSMC6"),
+    },
     "TSMC7": {
         "tech": "TSMC7", "vdd": TECH_REGISTRY["TSMC7"].vdd,
         "nmos_model": "nch_svt_mac", "pmos_model": "pch_lvt_mac",
@@ -167,6 +174,10 @@ CORE_VT_VARIANTS: Dict[str, Dict[str, Any]] = {
     "TSMC5_lvt":  _tsmc_entry("TSMC5", "lvt_mac"),
     "TSMC5_ulvt": _tsmc_entry("TSMC5", "ulvt_mac"),
     "TSMC5_elvt": _tsmc_entry("TSMC5", "elvt_mac"),
+
+    # TSMC6 — svt already tested; add lvt, ulvt (N7-derived node, same flavors)
+    "TSMC6_lvt":  _tsmc_entry("TSMC6", "lvt_mac"),
+    "TSMC6_ulvt": _tsmc_entry("TSMC6", "ulvt_mac"),
 
     # TSMC7 — svt already tested; add lvt, ulvt
     "TSMC7_lvt":  _tsmc_entry("TSMC7", "lvt_mac"),

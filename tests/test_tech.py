@@ -68,7 +68,9 @@ def test_tech_config_list_devices():
 
 def test_tech_registry_all_techs():
     from pycmg.tech import TECH_REGISTRY, list_techs
-    assert set(list_techs()) >= {"ASAP7", "TSMC5", "TSMC7", "TSMC12", "TSMC16"}
+    assert set(list_techs()) >= {
+        "ASAP7", "TSMC5", "TSMC6", "TSMC7", "TSMC12", "TSMC16"
+    }
 
 
 def test_tech_config_pdk_path():
@@ -101,6 +103,20 @@ def test_min_l_tsmc7_core():
     """TSMC7 core device min_l should be 8nm (from PDK lmin scanning)."""
     from pycmg.tech import TECH_REGISTRY
     tech = TECH_REGISTRY["TSMC7"]
+    dev = tech.get_device("nmos_svt")
+    dev._min_l = None  # Reset cache
+    min_l = dev.get_min_l(tech.pdk_path)
+    assert abs(min_l - 8e-9) < 1e-12, f"Expected 8nm, got {min_l*1e9:.1f}nm"
+
+
+@pytest.mark.skipif(
+    not (ROOT / "modelcards" / "TSMC6" / "cln6_1d8_sp_v1d0_2p2.l").exists(),
+    reason="TSMC6 PDK missing"
+)
+def test_min_l_tsmc6_core():
+    """TSMC6 core device min_l should be 8nm (N7-derived binning)."""
+    from pycmg.tech import TECH_REGISTRY
+    tech = TECH_REGISTRY["TSMC6"]
     dev = tech.get_device("nmos_svt")
     dev._min_l = None  # Reset cache
     min_l = dev.get_min_l(tech.pdk_path)

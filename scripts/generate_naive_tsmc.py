@@ -113,8 +113,8 @@ Examples:
     parser.add_argument(
         "--tech",
         required=True,
-        choices=["TSMC5", "TSMC7", "TSMC12", "TSMC16"],
-        help="Technology node (TSMC5, TSMC7, TSMC12, or TSMC16)"
+        choices=["TSMC5", "TSMC6", "TSMC7", "TSMC12", "TSMC16"],
+        help="Technology node (TSMC5, TSMC6, TSMC7, TSMC12, or TSMC16)"
     )
     parser.add_argument(
         "--pdk",

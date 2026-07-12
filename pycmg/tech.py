@@ -323,6 +323,13 @@ TECH_REGISTRY: Dict[str, TechConfig] = {
         devices=_tsmc_devices(["svt", "lvt", "ulvt", "elvt"], tfin=6e-9),
         pdk_path="modelcards/TSMC5/cln5_1d2_sp_v1d2_2p2.l",
     ),
+    "TSMC6": TechConfig(
+        name="TSMC6",
+        vdd=0.75,
+        tfin=6e-9,
+        devices=_tsmc_devices(["svt", "lvt", "ulvt"], tfin=6e-9),
+        pdk_path="modelcards/TSMC6/cln6_1d8_sp_v1d0_2p2.l",
+    ),
     "TSMC7": TechConfig(
         name="TSMC7",
         vdd=0.75,

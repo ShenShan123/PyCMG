@@ -348,7 +348,7 @@ save_npz(data["inputs"], data["geometry"], data["outputs"],
 
 Process parameters are **per-bin accurate**: for TSMC techs, different (L, NFIN) bins may produce different process param values because the variant overlay differs per bin. This is more accurate than using a single set of process parameters per Vt flavor.
 
-**Coverage:** 954 total (L, NFIN) geometry combos across 5 techs, 21 variants. TSMC techs have 25-36 combos per device (from PDK bin boundaries); ASAP7 has 7 combos per device (fallback list).
+**Coverage:** 1692 total (L, NFIN) geometry combos across 6 techs, 24 variants. TSMC techs have ~36-40 combos per device (from PDK bin boundaries); ASAP7 has 48 combos per device (fallback lists).
 
 ## Supported Technologies
 
@@ -356,10 +356,11 @@ Process parameters are **per-bin accurate**: for TSMC techs, different (L, NFIN)
 |------------|------|-----|------|------------|---------|
 | ASAP7 | 7nm | 0.90V | 6.5nm | rvt, lvt, slvt, sram | 8 |
 | TSMC5 | 5nm | 0.65V | 6.0nm | svt, lvt, ulvt, elvt | 8 |
+| TSMC6 | 6nm | 0.75V | 6.0nm | svt, lvt, ulvt | 6 |
 | TSMC7 | 7nm | 0.75V | 6.0nm | svt, lvt, ulvt | 6 |
 | TSMC12 | 12nm | 0.80V | 6.0nm | svt, lvt, hvt, ulvt, lnvt | 10 |
 | TSMC16 | 16nm | 0.80V | 6.0nm | svt, lvt, hvt, ulvt, lnvt | 10 |
-| **Total** | | | | | **42** |
+| **Total** | | | | | **48** |
 
 Each "device" is an NMOS/PMOS pair for a given Vt flavor. For example, ASAP7 has 4 flavors x 2 polarities = 8 devices: `nmos_rvt`, `pmos_rvt`, `nmos_lvt`, `pmos_lvt`, etc.
 
@@ -621,7 +622,7 @@ pycmg-wrapper/
 │   ├── nn_config.py             # NN training config (ProcessParams, NNTechConfig, extract_process_params)
 │   └── nn_generate.py           # NN .npz data generation using PDK-driven (L, NFIN) combos
 ├── tests/                        # Test suite (280 tests)
-│   ├── conftest.py              # Tiered technology registry (21 entries)
+│   ├── conftest.py              # Tiered technology registry (24 entries)
 │   ├── helpers.py               # NGSPICE runner helpers, comparison functions
 │   ├── test_api.py              # API smoke tests
 │   ├── test_tech.py             # Technology registry tests
@@ -643,6 +644,7 @@ pycmg-wrapper/
 ├── modelcards/                   # Technology model cards
 │   ├── ASAP7/                   # ASAP7 PDK model files
 │   ├── TSMC5/                   # TSMC 5nm model files
+│   ├── TSMC6/                   # TSMC 6nm model files
 │   ├── TSMC7/                   # TSMC 7nm model files
 │   ├── TSMC12/                  # TSMC 12nm model files
 │   └── TSMC16/                  # TSMC 16nm model files
@@ -729,7 +731,7 @@ pycmg-wrapper/
 
 **`NNTechConfig`** -- NN training config wrapping PyCMG's `TechConfig`. Stores training VDD, variant name list, temperature, and optional fallback NFIN values (for ASAP7). Properties: `name`, `vdd`, `tfin`, `pycmg_tech`. Methods: `get_geometry_combos(device_type, variant)` (returns PDK-legal `(L, NFIN)` pairs), `get_model_name(device_type, variant)`, `resolve_modelcard(device_type, variant, L, NFIN)`.
 
-**`TECH_CONFIGS`** -- Dict of 5 NNTechConfig objects: `asap7`, `tsmc5`, `tsmc7`, `tsmc12`, `tsmc16`.
+**`TECH_CONFIGS`** -- Dict of 6 NNTechConfig objects: `asap7`, `tsmc5`, `tsmc6`, `tsmc7`, `tsmc12`, `tsmc16`.
 
 **`INPUT_COLUMNS`** -- 19 NN input feature names: 4 voltages + `NFIN` + `L` + `T` + 12 process params.
 
