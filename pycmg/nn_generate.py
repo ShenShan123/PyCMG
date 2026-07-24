@@ -852,10 +852,10 @@ def generate_one_bin(spec: BinSpec) -> Optional[Dict[str, np.ndarray]]:
     # V6.2.1 (2026-05-13): extended to TSMC12/16 for the per-tech retrain.
     # Overlay is VDD-relative (Vd ∈ [0.30·VDD, 0.70·VDD]), Vth tracked
     # per-bin via find_threshold — safe at the TSMC12/16 vdd_train=0.80 V.
-    # V6.9.0 (2026-07-12): tsmc6 added (N7-derived node, same overlay
-    # semantics as tsmc7).
+    # V6.9.0 added tsmc6; retired 2026-07-24 (TSMC6 is TSMC7 relabelled under
+    # BSIM-CMG — see PyCircuitSim docs/2026-07-21-systematic-audit.md D1).
     if spec.enable_inv_trip and spec.tech_name in (
-        "tsmc5", "tsmc6", "tsmc7", "tsmc12", "tsmc16"
+        "tsmc5", "tsmc7", "tsmc12", "tsmc16"
     ):
         try:
             vth_mag = find_threshold(inst, spec.vdd,

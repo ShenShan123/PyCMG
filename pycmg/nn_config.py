@@ -243,13 +243,6 @@ TSMC5_CONFIG = NNTechConfig(
     default_variant="svt",
 )
 
-TSMC6_CONFIG = NNTechConfig(
-    pycmg_name="TSMC6",
-    vdd_train=0.75,
-    variant_names=["svt", "lvt", "ulvt"],
-    default_variant="svt",
-)
-
 TSMC7_CONFIG = NNTechConfig(
     pycmg_name="TSMC7",
     vdd_train=0.75,
@@ -274,7 +267,6 @@ TSMC16_CONFIG = NNTechConfig(
 TECH_CONFIGS: Dict[str, NNTechConfig] = {
     "asap7": ASAP7_CONFIG,
     "tsmc5": TSMC5_CONFIG,
-    "tsmc6": TSMC6_CONFIG,
     "tsmc7": TSMC7_CONFIG,
     "tsmc12": TSMC12_CONFIG,
     "tsmc16": TSMC16_CONFIG,
