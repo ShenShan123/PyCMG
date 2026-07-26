@@ -28,7 +28,7 @@ and quantifies every simplification it applies:
      ignores these on both the PyCMG and NGSPICE sides.
 
 Usage:
-    python scripts/audit_pdk_parse.py [--techs TSMC5,TSMC7,...] [--jobs N]
+    python scripts/audit_pdk_parse.py [--techs TSMC5,TSMC6,...] [--jobs N]
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ from pycmg.tech import (  # noqa: E402
 _ANY_ASSIGN_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*('[^']*'|\"[^\"]*\"|[^\s=]+)")
 
-_DEFAULT_TECHS = ["TSMC5", "TSMC7", "TSMC12", "TSMC16"]
+_DEFAULT_TECHS = ["TSMC5", "TSMC6", "TSMC7", "TSMC12", "TSMC16"]
 
 
 def _is_sentinel(fval: float) -> bool:
